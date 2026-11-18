@@ -1,4 +1,5 @@
 mod cache;
+mod jev;
 mod prompt;
 mod review;
 mod target;
@@ -11,6 +12,7 @@ use crate::resolve::RuleFile;
 use crate::run::Finding;
 use anyhow::Result;
 use cache::{Cache, Stored};
+use jev::Jev;
 use review::{Candidate, SemRule};
 use std::collections::BTreeSet;
 use target::{Loaded, Target};
@@ -19,6 +21,31 @@ use tools::Workspace;
 const TRIAGE_WORKERS: usize = 8;
 const CONFIRM_WORKERS: usize = 4;
 const MAX_WHOLE_BYTES: usize = 300_000;
+const FLAG_FOR_REVIEW_AT: f64 = 0.5;
+const BLOCK_ALONE_AT: f64 = 0.85;
+
+pub struct Engines {
+    jev: Option<Jev>,
+    claude: Option<Client>,
+}
+
+impl Engines {
+    pub fn from_env() -> Option<Engines> {
+        let engines = Engines {
+            jev: Jev::from_env(),
+            claude: Client::from_env(),
+        };
+        (engines.jev.is_some() || engines.claude.is_some()).then_some(engines)
+    }
+
+    fn tag(&self) -> &'static str {
+        match (&self.jev, &self.claude) {
+            (Some(_), Some(_)) => "jev+claude",
+            (Some(_), None) => "jev",
+            _ => "claude",
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct Report {
@@ -28,6 +55,7 @@ pub struct Report {
     pub flagged: usize,
     pub errors: Vec<String>,
     pub notes: Vec<String>,
+    pub uncertain: Vec<String>,
 }
 
 struct Pending {
@@ -35,31 +63,19 @@ struct Pending {
     rules: Vec<usize>,
 }
 
-fn cache_key(rule: &SemRule, target: &Target) -> String {
-    let examples: String = rule
-        .rule
-        .examples
-        .iter()
-        .map(|e| format!("{}\u{0}{}\u{0}", e.good, e.code))
-        .collect();
-    cache::key(&[
-        prompt::VERSION,
-        prompt::TRIAGE_MODEL,
-        prompt::CONFIRM_MODEL,
-        &rule.file.parsed.context,
-        &rule.rule.title,
-        &rule.rule.prose,
-        &examples,
-        &target.path,
-        &target.text(),
-        &target.diff,
-    ])
+struct Review<'a> {
+    engines: &'a Engines,
+    rules: Vec<SemRule<'a>>,
+    targets: Vec<Target>,
+    cache: Cache,
+    stored: Vec<(usize, Stored)>,
+    report: Report,
 }
 
 fn finding(rule: &SemRule, stored: &Stored) -> Finding {
     Finding {
         path: Some(stored.path.clone()),
-        line: Some(stored.line),
+        line: Some(stored.line).filter(|line| *line > 0),
         rule_id: rule.rule.id.clone(),
         title: rule.rule.title.clone(),
         rule_file: rule.file.path.clone(),
@@ -85,6 +101,215 @@ fn verify(raw: &review::Raw, targets: &[Target]) -> Option<Stored> {
     })
 }
 
+fn unconfirmed(candidate: &Candidate, target: &Target) -> Stored {
+    let line = Some(candidate.line)
+        .filter(|line| target.is_changed(*line))
+        .unwrap_or(0);
+    let quoted = target
+        .lines
+        .get((line as usize).wrapping_sub(1))
+        .map(|text| text.trim())
+        .unwrap_or_default();
+    let probability = candidate.probability.unwrap_or_default();
+    let detail = format!(
+        "{quoted}\nA decision model judged this a likely violation (probability {probability:.2}). \
+         No second reviewer checked it, so read the rule against this line before changing code."
+    );
+    Stored {
+        path: target.path.clone(),
+        line,
+        detail: detail.trim().to_string(),
+    }
+}
+
+impl Review<'_> {
+    fn key(&self, rule: usize, target: usize) -> String {
+        let (rule, target) = (&self.rules[rule], &self.targets[target]);
+        let examples: String = rule
+            .rule
+            .examples
+            .iter()
+            .map(|e| format!("{}\u{0}{}\u{0}", e.good, e.code))
+            .collect();
+        cache::key(&[
+            self.engines.tag(),
+            jev::MODEL,
+            prompt::VERSION,
+            prompt::TRIAGE_MODEL,
+            prompt::CONFIRM_MODEL,
+            &rule.file.parsed.context,
+            &rule.rule.title,
+            &rule.rule.prose,
+            &examples,
+            &target.path,
+            &target.text(),
+            &target.diff,
+        ])
+    }
+
+    fn pending(&mut self) -> Vec<Pending> {
+        let mut pending = Vec::new();
+        for target in 0..self.targets.len() {
+            let path = &self.targets[target].path;
+            let applicable: Vec<usize> = (0..self.rules.len())
+                .filter(|index| {
+                    self.rules[*index]
+                        .file
+                        .applies(self.rules[*index].rule, path)
+                })
+                .collect();
+            let mut fresh = Vec::new();
+            for rule in applicable {
+                self.report.checks += 1;
+                let key = self.key(rule, target);
+                match self.cache.get(&key) {
+                    Some(hits) => {
+                        self.report.cached += 1;
+                        self.stored.extend(hits.into_iter().map(|hit| (rule, hit)));
+                    }
+                    None => fresh.push(rule),
+                }
+            }
+            if !fresh.is_empty() {
+                pending.push(Pending {
+                    target,
+                    rules: fresh,
+                });
+            }
+        }
+        pending
+    }
+
+    fn triage(&mut self, pending: &[Pending]) -> Vec<Candidate> {
+        let (engines, rules, targets) = (self.engines, &self.rules, &self.targets);
+        let triaged = pool::map(pending, TRIAGE_WORKERS, |job| {
+            let target = &targets[job.target];
+            match (&engines.jev, &engines.claude) {
+                (Some(jev), _) => {
+                    jev.triage(rules, &job.rules, job.target, target, FLAG_FOR_REVIEW_AT)
+                }
+                (None, Some(claude)) => {
+                    review::triage(claude, rules, &job.rules, job.target, target)
+                }
+                (None, None) => Ok(Vec::new()),
+            }
+        });
+        let mut candidates = Vec::new();
+        for (job, result) in pending.iter().zip(triaged) {
+            match result {
+                Ok(flagged) => {
+                    for rule in job
+                        .rules
+                        .iter()
+                        .filter(|rule| !flagged.iter().any(|c| c.rule == **rule))
+                    {
+                        let key = self.key(*rule, job.target);
+                        self.cache.put(key, Vec::new());
+                    }
+                    candidates.extend(flagged);
+                }
+                Err(err) => self
+                    .report
+                    .errors
+                    .push(format!("{}: {err:#}", self.targets[job.target].path)),
+            }
+        }
+        candidates
+    }
+
+    fn whole_change(&mut self, claude: &Client) -> Vec<Candidate> {
+        if self.targets.len() < 2 {
+            return Vec::new();
+        }
+        let sizes = self.targets.iter().map(|t| {
+            if t.diff.is_empty() {
+                t.text().len()
+            } else {
+                t.diff.len()
+            }
+        });
+        let size: usize = sizes.sum();
+        if size > MAX_WHOLE_BYTES {
+            self.report.notes.push(format!(
+                "the change is {size} bytes, over the {MAX_WHOLE_BYTES} byte limit for the whole-change pass, \
+                 so rules that span files were not judged; split the change"
+            ));
+            return Vec::new();
+        }
+        let applies = |rule: &SemRule| {
+            self.targets
+                .iter()
+                .any(|target| rule.file.applies(rule.rule, &target.path))
+        };
+        let indices: Vec<usize> = (0..self.rules.len())
+            .filter(|index| applies(&self.rules[*index]))
+            .collect();
+        match review::whole(claude, &self.rules, &indices, &self.targets) {
+            Ok(candidates) => candidates,
+            Err(err) => {
+                self.report
+                    .errors
+                    .push(format!("whole-change pass: {err:#}"));
+                Vec::new()
+            }
+        }
+    }
+
+    fn confirm(&mut self, claude: &Client, workspace: &Workspace, candidates: &[Candidate]) {
+        let (rules, targets) = (&self.rules, &self.targets);
+        let confirmed = pool::map(candidates, CONFIRM_WORKERS, |candidate| {
+            review::confirm(
+                claude,
+                workspace,
+                &rules[candidate.rule],
+                candidate,
+                targets,
+            )
+        });
+        for (candidate, result) in candidates.iter().zip(confirmed) {
+            match result {
+                Ok(raw) => {
+                    let verified: Vec<Stored> = raw
+                        .iter()
+                        .filter_map(|raw| verify(raw, &self.targets))
+                        .collect();
+                    if let Some(target) = candidate.target.filter(|_| !candidate.spans_files) {
+                        let key = self.key(candidate.rule, target);
+                        self.cache.put(key, verified.clone());
+                    }
+                    self.stored
+                        .extend(verified.into_iter().map(|hit| (candidate.rule, hit)));
+                }
+                Err(err) => self.report.errors.push(format!(
+                    "{}: {err:#}",
+                    self.rules[candidate.rule].rule.title
+                )),
+            }
+        }
+    }
+
+    fn accept(&mut self, candidates: &[Candidate]) {
+        for candidate in candidates {
+            let Some(target) = candidate.target else {
+                continue;
+            };
+            let hit = unconfirmed(candidate, &self.targets[target]);
+            let probability = candidate.probability.unwrap_or_default();
+            if probability < BLOCK_ALONE_AT {
+                let title = &self.rules[candidate.rule].rule.title;
+                self.report.uncertain.push(format!(
+                    "{}:{}: {title} (probability {probability:.2})",
+                    hit.path, hit.line
+                ));
+                continue;
+            }
+            let key = self.key(candidate.rule, target);
+            self.cache.put(key, vec![hit.clone()]);
+            self.stored.push((candidate.rule, hit));
+        }
+    }
+}
+
 fn load_targets(
     git: &Git,
     merge_base: Option<&str>,
@@ -105,51 +330,8 @@ fn load_targets(
     Ok(targets)
 }
 
-fn whole_change(
-    client: &Client,
-    rules: &[SemRule],
-    targets: &[Target],
-    report: &mut Report,
-) -> Vec<Candidate> {
-    if targets.len() < 2 {
-        return Vec::new();
-    }
-    let size: usize = targets
-        .iter()
-        .map(|t| {
-            if t.diff.is_empty() {
-                t.text().len()
-            } else {
-                t.diff.len()
-            }
-        })
-        .sum();
-    if size > MAX_WHOLE_BYTES {
-        report.notes.push(format!(
-            "the change is {size} bytes, over the {MAX_WHOLE_BYTES} byte limit for the whole-change pass, \
-             so rules that span files were not judged; split the change"
-        ));
-        return Vec::new();
-    }
-    let applies = |rule: &SemRule| {
-        targets
-            .iter()
-            .any(|target| rule.file.applies(rule.rule, &target.path))
-    };
-    let indices: Vec<usize> = (0..rules.len())
-        .filter(|index| applies(&rules[*index]))
-        .collect();
-    match review::whole(client, rules, &indices, targets) {
-        Ok(candidates) => candidates,
-        Err(err) => {
-            report.errors.push(format!("whole-change pass: {err:#}"));
-            Vec::new()
-        }
-    }
-}
-
 pub fn run(
-    client: &Client,
+    engines: &Engines,
     git: &Git,
     merge_base: Option<&str>,
     files: &[String],
@@ -172,87 +354,42 @@ pub fn run(
         root: git.root(),
         files: &all_files,
     };
-    let mut cache = Cache::load(git);
-    let mut stored: Vec<(usize, Stored)> = Vec::new();
+    let mut review = Review {
+        engines,
+        rules,
+        targets,
+        cache: Cache::load(git),
+        stored: Vec::new(),
+        report,
+    };
 
-    let mut pending = Vec::new();
-    for (target_index, target) in targets.iter().enumerate() {
-        let mut fresh = Vec::new();
-        for (index, rule) in rules
-            .iter()
-            .enumerate()
-            .filter(|(_, rule)| rule.file.applies(rule.rule, &target.path))
-        {
-            report.checks += 1;
-            match cache.get(&cache_key(rule, target)) {
-                Some(hits) => {
-                    report.cached += 1;
-                    stored.extend(hits.into_iter().map(|hit| (index, hit)));
-                }
-                None => fresh.push(index),
-            }
+    let pending = review.pending();
+    let mut candidates = review.triage(&pending);
+    match &engines.claude {
+        Some(claude) => {
+            candidates.extend(review.whole_change(claude));
+            review.confirm(claude, &workspace, &candidates);
         }
-        if !fresh.is_empty() {
-            pending.push(Pending {
-                target: target_index,
-                rules: fresh,
-            });
-        }
+        None => review.accept(&candidates),
+    }
+    review.report.flagged = candidates.len();
+    if !review.report.uncertain.is_empty() {
+        review.report.uncertain.sort();
+        review.report.notes.push(format!(
+            "{} possible violation(s) fell below the {BLOCK_ALONE_AT} probability needed to block without a second \
+             reviewer, so they did not fail the check; set ANTHROPIC_API_KEY to have each one confirmed or dismissed",
+            review.report.uncertain.len()
+        ));
+    }
+    if let Err(err) = review.cache.save() {
+        review.report.notes.push(format!("{err:#}"));
     }
 
-    let triaged = pool::map(&pending, TRIAGE_WORKERS, |job| {
-        review::triage(client, &rules, &job.rules, job.target, &targets[job.target])
-    });
-    let mut candidates = Vec::new();
-    for (job, result) in pending.iter().zip(triaged) {
-        let target = &targets[job.target];
-        match result {
-            Ok(flagged) => {
-                for index in job
-                    .rules
-                    .iter()
-                    .filter(|index| !flagged.iter().any(|c| c.rule == **index))
-                {
-                    cache.put(cache_key(&rules[*index], target), Vec::new());
-                }
-                candidates.extend(flagged);
-            }
-            Err(err) => report.errors.push(format!("{}: {err:#}", target.path)),
-        }
-    }
-    candidates.extend(whole_change(client, &rules, &targets, &mut report));
-    report.flagged = candidates.len();
-
-    let confirmed = pool::map(&candidates, CONFIRM_WORKERS, |candidate| {
-        review::confirm(
-            client,
-            &workspace,
-            &rules[candidate.rule],
-            candidate,
-            &targets,
-        )
-    });
-    for (candidate, result) in candidates.iter().zip(confirmed) {
-        let rule = &rules[candidate.rule];
-        match result {
-            Ok(raw) => {
-                let verified: Vec<Stored> =
-                    raw.iter().filter_map(|raw| verify(raw, &targets)).collect();
-                if let Some(target) = candidate.target.filter(|_| !candidate.spans_files) {
-                    cache.put(cache_key(rule, &targets[target]), verified.clone());
-                }
-                stored.extend(verified.into_iter().map(|hit| (candidate.rule, hit)));
-            }
-            Err(err) => report.errors.push(format!("{}: {err:#}", rule.rule.title)),
-        }
-    }
-    if let Err(err) = cache.save() {
-        report.notes.push(format!("{err:#}"));
-    }
-
-    report.findings = stored
+    let mut report = review.report;
+    report.findings = review
+        .stored
         .iter()
-        .map(|(index, hit)| finding(&rules[*index], hit))
+        .map(|(index, hit)| finding(&review.rules[*index], hit))
         .collect();
     report.findings.sort();
     report

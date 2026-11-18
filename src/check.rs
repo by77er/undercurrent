@@ -1,4 +1,3 @@
-use crate::api::Client;
 use crate::git::Git;
 use crate::resolve::{self, RuleFile, Source};
 use crate::run::{self, Finding, Job};
@@ -165,18 +164,18 @@ pub fn check(options: &Options) -> Result<Outcome> {
         outcome.unevaluated_reason = "--skip-semantic was passed";
         return Ok(outcome);
     }
-    let Some(client) = Client::from_env() else {
+    let Some(engines) = semantic::Engines::from_env() else {
         if options.require_semantic {
             bail!(
-                "{} semantic rule(s) apply but ANTHROPIC_API_KEY is not set; set it, or drop --require-semantic",
+                "{} semantic rule(s) apply but no model key is set; set TYPESAFE_API_KEY or ANTHROPIC_API_KEY, or drop --require-semantic",
                 applicable.len()
             );
         }
         outcome.unevaluated = applicable;
-        outcome.unevaluated_reason = "ANTHROPIC_API_KEY is not set";
+        outcome.unevaluated_reason = "neither TYPESAFE_API_KEY nor ANTHROPIC_API_KEY is set";
         return Ok(outcome);
     };
-    let report = semantic::run(&client, &git, merge_base.as_deref(), &files, &rule_files)?;
+    let report = semantic::run(&engines, &git, merge_base.as_deref(), &files, &rule_files)?;
     outcome.findings.extend(report.findings.iter().cloned());
     outcome.semantic = Some(report);
     Ok(outcome)

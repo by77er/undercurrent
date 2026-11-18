@@ -17,9 +17,15 @@ inputs:
       `commands` runs only command rules, `semantic` judges only semantic
       rules without executing anything from the change, `all` does both.
     default: all
+  typesafe-api-key:
+    description: >-
+      TypeSafe API key. With it, the Jev decision model does the first pass
+      over semantic rules. It is never passed to command rules.
+    default: ""
   anthropic-api-key:
     description: >-
-      Claude API key used to judge semantic rules. Without it they are listed
+      Claude API key. With it, a second reviewer confirms each flag and rules
+      that span files are judged. With neither key, semantic rules are listed
       but not judged. It is never passed to command rules.
     default: ""
 runs:
@@ -44,6 +50,7 @@ runs:
         UC_ALL: ${{ inputs.all }}
         UC_MODE: ${{ inputs.mode }}
         ANTHROPIC_API_KEY: ${{ inputs.mode != 'commands' && inputs.anthropic-api-key || '' }}
+        TYPESAFE_API_KEY: ${{ inputs.mode != 'commands' && inputs.typesafe-api-key || '' }}
       run: |
         args=()
         base="$UC_BASE"

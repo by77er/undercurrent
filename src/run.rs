@@ -80,7 +80,8 @@ fn run_job(job: &Job, root: &Path) -> Vec<Finding> {
     command
         .args(["-e", "-c", script])
         .current_dir(root.join(&job.file.dir))
-        .env_remove("ANTHROPIC_API_KEY");
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("TYPESAFE_API_KEY");
     if let Some(relative) = job.target.and_then(|target| job.file.relative(target)) {
         command.env("FILE", format!("./{relative}"));
     }

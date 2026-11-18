@@ -54,13 +54,13 @@ fn problems(outcome: &Outcome) -> Vec<String> {
     let Some(semantic) = &outcome.semantic else {
         return Vec::new();
     };
-    let errors = semantic
-        .errors
-        .iter()
-        .map(|error| format!("error: {error}"));
-    errors
-        .chain(semantic.notes.iter().map(|note| format!("note: {note}")))
-        .collect()
+    let tagged = |tag: &'static str, lines: &[String]| -> Vec<String> {
+        lines.iter().map(|line| format!("{tag}: {line}")).collect()
+    };
+    let mut all = tagged("possible", &semantic.uncertain);
+    all.extend(tagged("error", &semantic.errors));
+    all.extend(tagged("note", &semantic.notes));
+    all
 }
 
 pub fn text(outcome: &Outcome) -> String {

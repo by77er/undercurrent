@@ -53,7 +53,7 @@ enum Commands {
         skip_semantic: bool,
         #[arg(
             long,
-            help = "Fail if semantic rules apply and ANTHROPIC_API_KEY is not set"
+            help = "Fail if semantic rules apply and no model API key is set"
         )]
         require_semantic: bool,
     },

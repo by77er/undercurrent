@@ -35,4 +35,5 @@ jobs:
       - uses: ./
         with:
           mode: semantic
+          typesafe-api-key: ${{ secrets.TYPESAFE_API_KEY }}
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}

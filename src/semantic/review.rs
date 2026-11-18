@@ -22,6 +22,7 @@ pub struct Candidate {
     pub line: u32,
     pub reason: String,
     pub spans_files: bool,
+    pub probability: Option<f64>,
 }
 
 pub struct Raw {
@@ -114,6 +115,7 @@ pub fn triage(
             line: line_of(verdict),
             reason: verdict["reason"].as_str().unwrap_or_default().to_string(),
             spans_files: false,
+            probability: None,
         });
     }
     for (local, index) in indices.iter().enumerate() {
@@ -127,6 +129,7 @@ pub fn triage(
                 line: 0,
                 reason,
                 spans_files: false,
+                probability: None,
             });
         }
     }
@@ -176,6 +179,7 @@ pub fn whole(
                 verdict["reason"].as_str().unwrap_or_default()
             ),
             spans_files: true,
+            probability: None,
         });
     }
     Ok(candidates)
