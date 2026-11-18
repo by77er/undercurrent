@@ -113,7 +113,9 @@ fn unconfirmed(candidate: &Candidate, target: &Target, threshold: f64) -> Stored
     let probability = candidate.probability.unwrap_or_default();
     let detail = format!(
         "In changed {span}. A decision model judged this a violation with probability {probability:.2}, \
-         above the {threshold:.2} fitted to this rule's examples. No second reviewer checked it."
+         above the {threshold:.2} fitted to this rule's examples. No second reviewer checked it.\n\
+         Fix: change {span} to follow the rule. If they already comply, add them to the rule as a `good` \
+         example and run `uc test`, or set ANTHROPIC_API_KEY so a second reviewer confirms or dismisses this."
     );
     Stored {
         path: target.path.clone(),

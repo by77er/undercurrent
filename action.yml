@@ -36,10 +36,10 @@ runs:
       run: cargo build --release --locked --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml"
     - name: Restore verdict cache
       if: inputs.mode != 'commands'
-      uses: actions/cache@v4
+      uses: actions/cache/restore@v4
       with:
         path: .git/undercurrent-cache.json
-        key: undercurrent-${{ github.event.pull_request.number || github.ref_name }}-${{ github.run_id }}
+        key: undercurrent-${{ github.event.pull_request.number || github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
         restore-keys: |
           undercurrent-${{ github.event.pull_request.number || github.ref_name }}-
     - name: Run rules
@@ -63,3 +63,9 @@ runs:
         if [ "$UC_MODE" = "commands" ]; then args+=(--skip-semantic); fi
         if [ "$UC_MODE" = "semantic" ]; then args+=(--skip-commands); fi
         "$GITHUB_ACTION_PATH/target/release/uc" check "${args[@]}"
+    - name: Save verdict cache
+      if: always() && inputs.mode != 'commands'
+      uses: actions/cache/save@v4
+      with:
+        path: .git/undercurrent-cache.json
+        key: undercurrent-${{ github.event.pull_request.number || github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}

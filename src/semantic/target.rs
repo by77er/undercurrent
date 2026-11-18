@@ -67,7 +67,7 @@ impl Target {
         }
         let Ok(text) = String::from_utf8(bytes) else {
             return Ok(Loaded::Skipped(format!(
-                "{path} is not UTF-8 text, so no semantic rule judged it"
+                "{path} is not UTF-8 text, so no semantic rule judged it; re-encode it as UTF-8, or mark it as generated in .gitattributes"
             )));
         };
         let (diff, changed) = match merge_base {

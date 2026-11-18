@@ -172,7 +172,7 @@ pub fn check(options: &Options) -> Result<Outcome> {
             );
         }
         outcome.unevaluated = applicable;
-        outcome.unevaluated_reason = "neither TYPESAFE_API_KEY nor ANTHROPIC_API_KEY is set";
+        outcome.unevaluated_reason = "neither TYPESAFE_API_KEY nor ANTHROPIC_API_KEY is set; set one of them to have these rules judged";
         return Ok(outcome);
     };
     let fitted = match (&source, outcome.bootstrapped) {
