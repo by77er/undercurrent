@@ -1,5 +1,5 @@
-use super::hunks::{self, Hunk};
-use super::review::{Candidate, SemRule};
+use super::hunks::Hunk;
+use super::review::SemRule;
 use super::target::Target;
 use crate::api::{self, Failure};
 use anyhow::{bail, Result};
@@ -22,6 +22,15 @@ pub struct Jev {
 pub struct Verdict {
     pub violates: f64,
     pub needs_more: f64,
+}
+
+impl Verdict {
+    pub fn flag(&self, flag_at: f64) -> Option<bool> {
+        if self.violates >= flag_at {
+            return Some(false);
+        }
+        (self.needs_more >= NEEDS_MORE_AT && self.violates >= NOT_CLEARLY_FINE_AT).then_some(true)
+    }
 }
 
 fn instructions(question: &str, rule: &SemRule, held_out: Option<&str>) -> Value {
@@ -159,44 +168,5 @@ impl Jev {
             })
         });
         verdicts.collect()
-    }
-
-    pub fn triage(
-        &self,
-        rules: &[SemRule],
-        indices: &[usize],
-        target_index: usize,
-        target: &Target,
-        flag_at: &dyn Fn(usize) -> f64,
-    ) -> Result<Vec<Candidate>> {
-        let mut candidates = Vec::new();
-        for hunk in hunks::hunks(target) {
-            let verdicts = self.judge(rules, indices, target, &hunk, None)?;
-            for (index, verdict) in indices.iter().zip(verdicts) {
-                let flagged = verdict.violates >= flag_at(*index);
-                let unsettled = !flagged
-                    && verdict.needs_more >= NEEDS_MORE_AT
-                    && verdict.violates >= NOT_CLEARLY_FINE_AT;
-                if !flagged && !unsettled {
-                    continue;
-                }
-                let doubt = if unsettled {
-                    ", and judged that it depends on code outside the hunk"
-                } else {
-                    ""
-                };
-                candidates.push(Candidate {
-                    rule: *index,
-                    target: Some(target_index),
-                    line: hunk.start,
-                    end: hunk.end,
-                    reason: format!("a decision model put the probability that {} break the rule at {:.2}{doubt}", hunk.span(), verdict.violates),
-                    probability: Some(verdict.violates),
-                    unsettled,
-                    ..Candidate::default()
-                });
-            }
-        }
-        Ok(candidates)
     }
 }
