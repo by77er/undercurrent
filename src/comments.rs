@@ -1,11 +1,14 @@
 use crate::api::{self, Failure};
-use crate::findings::{Item, Report};
+use crate::findings::{self, Item, Report};
+use crate::git::Git;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
+use std::collections::HashSet;
+use std::path::Path;
 
 const MARKER: &str = "<!-- undercurrent:";
 const SUMMARY_MARKER: &str = "<!-- undercurrent:summary -->";
-const THREADS: &str = "query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(first:1){nodes{body author{__typename}}}}}}}}";
+const THREADS: &str = "query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor} nodes{id isResolved path comments(first:1){nodes{databaseId body author{__typename}}}}}}}}";
 const RESOLVE: &str =
     "mutation($thread:ID!){resolveReviewThread(input:{threadId:$thread}){thread{id}}}";
 const REOPEN: &str =
@@ -21,12 +24,16 @@ struct GitHub {
     head: String,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Thread {
     pub id: String,
     pub resolved: bool,
     pub semantic: bool,
     pub fingerprint: String,
+    pub rule: Option<(String, String)>,
+    pub path: Option<String>,
+    pub comment: u64,
+    pub body: String,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -37,27 +44,51 @@ pub struct Plan {
 }
 
 fn marker(item: &Item) -> String {
+    let kind = if item.semantic {
+        "semantic"
+    } else {
+        "commands"
+    };
     format!(
-        "{MARKER}{}:{} -->",
-        if item.semantic {
-            "semantic"
-        } else {
-            "commands"
-        },
-        item.fingerprint
+        "{MARKER}{kind}:{}:{}@{} -->",
+        item.fingerprint, item.rule_id, item.rule_file
     )
 }
 
-fn parse_marker(body: &str) -> Option<(bool, String)> {
+fn parse_marker(body: &str) -> Option<(bool, String, Option<(String, String)>)> {
     let rest = &body[body.find(MARKER)? + MARKER.len()..];
     let (kind, rest) = rest.split_once(':')?;
-    let fingerprint = rest.split_once(" -->")?.0;
+    let inner = rest.split_once(" -->")?.0;
     let semantic = match kind {
         "semantic" => true,
         "commands" => false,
         _ => return None,
     };
-    Some((semantic, fingerprint.to_string()))
+    let (fingerprint, rule) = match inner.split_once(':') {
+        Some((fingerprint, rule)) => (fingerprint, rule.split_once('@')),
+        None => (inner, None),
+    };
+    let rule = rule.map(|(id, file)| (id.to_string(), file.to_string()));
+    Some((semantic, fingerprint.to_string(), rule))
+}
+
+fn flagged_line_remains(thread: &Thread, root: Option<&Path>) -> bool {
+    let (Some((rule_id, rule_file)), Some(path)) = (&thread.rule, &thread.path) else {
+        return false;
+    };
+    let Some(root) = root else { return true };
+    let Ok(text) = std::fs::read_to_string(root.join(path)) else {
+        return false;
+    };
+    text.lines().any(|line| {
+        findings::line_fingerprint(rule_id, rule_file, path, line) == thread.fingerprint
+    })
+}
+
+fn closed(thread: &Thread, head: &str) -> String {
+    let short: String = head.chars().take(7).collect();
+    let retired = thread.body.replacen(MARKER, "<!-- undercurrent-closed:", 1);
+    format!("**Resolved:** this finding no longer appears as of {short}.\n\n---\n\n{retired}")
 }
 
 fn fenced(text: &str) -> String {
@@ -91,7 +122,7 @@ fn body(item: &Item) -> String {
     )
 }
 
-pub fn plan(report: &Report, threads: &[Thread]) -> Plan {
+pub fn plan(report: &Report, threads: &[Thread], lingering: &HashSet<String>) -> Plan {
     let mut plan = Plan::default();
     for thread in threads {
         let present = report
@@ -103,9 +134,10 @@ pub fn plan(report: &Report, threads: &[Thread]) -> Plan {
         } else {
             report.commands_complete
         };
+        let unsettled = thread.semantic && lingering.contains(&thread.id);
         if present && thread.resolved {
             plan.reopen.push(thread.id.clone());
-        } else if !present && !thread.resolved && judged {
+        } else if !present && !thread.resolved && judged && !unsettled {
             plan.resolve.push(thread.id.clone());
         }
     }
@@ -209,17 +241,20 @@ impl GitHub {
             {
                 let first = &node["comments"]["nodes"][0];
                 let ours = first["author"]["__typename"] == "Bot";
-                let parsed = first["body"]
-                    .as_str()
-                    .and_then(parse_marker)
-                    .filter(|_| ours);
-                if let (Some((semantic, fingerprint)), Some(id)) = (parsed, node["id"].as_str()) {
-                    let resolved = node["isResolved"].as_bool().unwrap_or(false);
+                let text = first["body"].as_str().unwrap_or_default();
+                let parsed = parse_marker(text).filter(|_| ours);
+                if let (Some((semantic, fingerprint, rule)), Some(id)) =
+                    (parsed, node["id"].as_str())
+                {
                     threads.push(Thread {
                         id: id.to_string(),
-                        resolved,
+                        resolved: node["isResolved"].as_bool().unwrap_or(false),
                         semantic,
                         fingerprint,
+                        rule,
+                        path: node["path"].as_str().map(String::from),
+                        comment: first["databaseId"].as_u64().unwrap_or_default(),
+                        body: text.to_string(),
                     });
                 }
             }
@@ -341,7 +376,13 @@ pub fn sync(report: &Report) -> Result<Vec<String>> {
             )])
         }
     };
-    let plan = plan(report, &threads);
+    let root = Git::discover().ok().map(|git| git.root().to_path_buf());
+    let lingering: HashSet<String> = threads
+        .iter()
+        .filter(|thread| flagged_line_remains(thread, root.as_deref()))
+        .map(|thread| thread.id.clone())
+        .collect();
+    let plan = plan(report, &threads, &lingering);
     let to_post: Vec<&Item> = plan
         .post
         .iter()
@@ -354,18 +395,28 @@ pub fn sync(report: &Report) -> Result<Vec<String>> {
         .filter(|item| item.path.is_none())
         .collect();
     loose.extend(unposted.iter().map(|index| to_post[*index]));
-    for (mutation, ids, action) in [
-        (RESOLVE, &plan.resolve, "resolve a fixed finding's thread"),
-        (
-            REOPEN,
-            &plan.reopen,
-            "reopen a thread whose finding came back",
-        ),
-    ] {
-        for id in ids {
-            if let Err(failure) = github.query(mutation, json!({ "thread": id })) {
-                problems.push(explain(action, failure));
-            }
+    for id in &plan.resolve {
+        if github.query(RESOLVE, json!({ "thread": id })).is_ok() {
+            continue;
+        }
+        let Some(thread) = threads.iter().find(|thread| &thread.id == id) else {
+            continue;
+        };
+        let edit = json!({ "body": closed(thread, &github.head) });
+        if let Err(failure) = github.rest(
+            "PATCH",
+            &format!("pulls/comments/{}", thread.comment),
+            Some(&edit),
+        ) {
+            problems.push(explain(
+                "mark a fixed finding's comment as resolved",
+                failure,
+            ));
+        }
+    }
+    for id in &plan.reopen {
+        if let Err(failure) = github.query(REOPEN, json!({ "thread": id })) {
+            problems.push(explain("reopen a thread whose finding came back", failure));
         }
     }
     if let Err(failure) = github.summary(&loose) {
@@ -395,9 +446,9 @@ mod tests {
             line: Some(3),
             title: "T".to_string(),
             rule_id: "r".to_string(),
-            rule_file: "UNDERCURRENT.md".to_string(),
+            rule_file: "src/UNDERCURRENT.md".to_string(),
             prose: "P".to_string(),
-            detail: "D".to_string(),
+            detail: "quoted\nwhy\nFix: do this".to_string(),
         }
     }
 
@@ -407,17 +458,38 @@ mod tests {
             resolved,
             semantic,
             fingerprint: fingerprint.to_string(),
+            ..Thread::default()
         }
+    }
+
+    fn none() -> HashSet<String> {
+        HashSet::new()
     }
 
     #[test]
     fn markers_round_trip_through_a_comment_body() {
         let finding = item("abc123", true, Some("a.rs"));
+        let rule = Some(("r".to_string(), "src/UNDERCURRENT.md".to_string()));
         assert_eq!(
             parse_marker(&body(&finding)),
-            Some((true, "abc123".to_string()))
+            Some((true, "abc123".to_string(), rule))
+        );
+        assert_eq!(
+            parse_marker("x <!-- undercurrent:commands:abc -->"),
+            Some((false, "abc".to_string(), None))
         );
         assert_eq!(parse_marker("an ordinary comment"), None);
+    }
+
+    #[test]
+    fn a_closed_comment_is_no_longer_recognised() {
+        let open = Thread {
+            body: body(&item("abc", false, Some("a.rs"))),
+            ..thread("T", "abc", false, false)
+        };
+        let edited = closed(&open, "0123456789");
+        assert!(edited.starts_with("**Resolved:** this finding no longer appears as of 0123456."));
+        assert_eq!(parse_marker(&edited), None);
     }
 
     #[test]
@@ -441,7 +513,7 @@ mod tests {
             resolve: vec!["T2".to_string()],
             reopen: vec![],
         };
-        assert_eq!(plan(&report, &threads), expected);
+        assert_eq!(plan(&report, &threads, &none()), expected);
     }
 
     #[test]
@@ -460,6 +532,52 @@ mod tests {
             resolve: vec![],
             reopen: vec!["T2".to_string()],
         };
-        assert_eq!(plan(&report, &threads), expected);
+        assert_eq!(plan(&report, &threads, &none()), expected);
+    }
+
+    #[test]
+    fn a_semantic_thread_stays_open_while_its_flagged_line_is_still_in_the_file() {
+        let report = Report {
+            commands_complete: true,
+            semantic_complete: true,
+            items: vec![],
+        };
+        let threads = [
+            thread("T1", "unreported", true, false),
+            thread("T2", "gone", true, false),
+            thread("T3", "command", false, false),
+        ];
+        let lingering: HashSet<String> = ["T1".to_string(), "T3".to_string()].into_iter().collect();
+        let expected = Plan {
+            post: vec![],
+            resolve: vec!["T2".to_string(), "T3".to_string()],
+            reopen: vec![],
+        };
+        assert_eq!(plan(&report, &threads, &lingering), expected);
+    }
+
+    #[test]
+    fn the_flagged_line_is_found_by_its_fingerprint() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let rule = ("r".to_string(), "UNDERCURRENT.md".to_string());
+        let fingerprint =
+            findings::line_fingerprint(&rule.0, &rule.1, "Cargo.toml", "edition = \"2021\"");
+        let found = Thread {
+            rule: Some(rule.clone()),
+            path: Some("Cargo.toml".to_string()),
+            ..thread("T", &fingerprint, true, false)
+        };
+        assert!(flagged_line_remains(&found, Some(root)));
+        assert!(flagged_line_remains(&found, None));
+        let missing = Thread {
+            rule: Some(rule),
+            path: Some("Cargo.toml".to_string()),
+            ..thread("T", "other", true, false)
+        };
+        assert!(!flagged_line_remains(&missing, Some(root)));
+        assert!(!flagged_line_remains(
+            &thread("T", "legacy", true, false),
+            Some(root)
+        ));
     }
 }

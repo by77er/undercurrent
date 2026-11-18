@@ -24,6 +24,10 @@ pub struct Report {
     pub items: Vec<Item>,
 }
 
+pub fn line_fingerprint(rule_id: &str, rule_file: &str, path: &str, line_text: &str) -> String {
+    semantic::digest(&[rule_id, rule_file, path, line_text.trim()])
+}
+
 fn fingerprint(finding: &Finding, root: &Path) -> String {
     let path = finding.path.as_deref().unwrap_or_default();
     let flagged_line = finding
@@ -32,16 +36,14 @@ fn fingerprint(finding: &Finding, root: &Path) -> String {
         .zip(finding.line)
         .and_then(|(path, line)| {
             let text = std::fs::read_to_string(root.join(path)).ok()?;
-            text.lines()
-                .nth(line as usize - 1)
-                .map(|line| line.trim().to_string())
+            text.lines().nth(line as usize - 1).map(String::from)
         });
     let anchor = match (&finding.path, flagged_line) {
         (_, Some(text)) => text,
         (Some(_), None) => String::new(),
         (None, None) => finding.detail.clone(),
     };
-    semantic::digest(&[&finding.rule_id, &finding.rule_file, path, &anchor])
+    line_fingerprint(&finding.rule_id, &finding.rule_file, path, &anchor)
 }
 
 pub fn write(destination: &str, outcome: &Outcome, root: &Path) -> Result<()> {
