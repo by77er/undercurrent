@@ -55,7 +55,14 @@ fn marker(item: &Item) -> String {
     )
 }
 
-fn parse_marker(body: &str) -> Option<(bool, String, Option<(String, String)>)> {
+#[derive(Debug, PartialEq)]
+struct Marker {
+    semantic: bool,
+    fingerprint: String,
+    rule: Option<(String, String)>,
+}
+
+fn parse_marker(body: &str) -> Option<Marker> {
     let rest = &body[body.find(MARKER)? + MARKER.len()..];
     let (kind, rest) = rest.split_once(':')?;
     let inner = rest.split_once(" -->")?.0;
@@ -69,7 +76,11 @@ fn parse_marker(body: &str) -> Option<(bool, String, Option<(String, String)>)> 
         None => (inner, None),
     };
     let rule = rule.map(|(id, file)| (id.to_string(), file.to_string()));
-    Some((semantic, fingerprint.to_string(), rule))
+    Some(Marker {
+        semantic,
+        fingerprint: fingerprint.to_string(),
+        rule,
+    })
 }
 
 fn flagged_line_remains(thread: &Thread, root: Option<&Path>) -> bool {
@@ -243,15 +254,13 @@ impl GitHub {
                 let ours = first["author"]["__typename"] == "Bot";
                 let text = first["body"].as_str().unwrap_or_default();
                 let parsed = parse_marker(text).filter(|_| ours);
-                if let (Some((semantic, fingerprint, rule)), Some(id)) =
-                    (parsed, node["id"].as_str())
-                {
+                if let (Some(marker), Some(id)) = (parsed, node["id"].as_str()) {
                     threads.push(Thread {
                         id: id.to_string(),
                         resolved: node["isResolved"].as_bool().unwrap_or(false),
-                        semantic,
-                        fingerprint,
-                        rule,
+                        semantic: marker.semantic,
+                        fingerprint: marker.fingerprint,
+                        rule: marker.rule,
                         path: node["path"].as_str().map(String::from),
                         comment: first["databaseId"].as_u64().unwrap_or_default(),
                         body: text.to_string(),
@@ -470,13 +479,20 @@ mod tests {
     fn markers_round_trip_through_a_comment_body() {
         let finding = item("abc123", true, Some("a.rs"));
         let rule = Some(("r".to_string(), "src/UNDERCURRENT.md".to_string()));
-        assert_eq!(
-            parse_marker(&body(&finding)),
-            Some((true, "abc123".to_string(), rule))
-        );
+        let expected = Marker {
+            semantic: true,
+            fingerprint: "abc123".to_string(),
+            rule,
+        };
+        assert_eq!(parse_marker(&body(&finding)), Some(expected));
+        let legacy = Marker {
+            semantic: false,
+            fingerprint: "abc".to_string(),
+            rule: None,
+        };
         assert_eq!(
             parse_marker("x <!-- undercurrent:commands:abc -->"),
-            Some((false, "abc".to_string(), None))
+            Some(legacy)
         );
         assert_eq!(parse_marker("an ordinary comment"), None);
     }
