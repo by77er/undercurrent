@@ -60,21 +60,35 @@ fn parse_marker(body: &str) -> Option<(bool, String)> {
     Some((semantic, fingerprint.to_string()))
 }
 
-fn body(item: &Item) -> String {
-    let mut out = format!("**{}**\n\n{}\n", item.title, item.prose);
-    if !item.detail.is_empty() {
-        out.push_str(&format!(
-            "\n```\n{}\n```\n",
-            item.detail.replace("```", "'''")
-        ));
+fn fenced(text: &str) -> String {
+    format!("\n```\n{}\n```\n", text.replace("```", "'''"))
+}
+
+fn detail(item: &Item) -> String {
+    if item.detail.is_empty() {
+        return String::new();
     }
-    out.push_str(&format!(
-        "\n<sub>Undercurrent rule `{}` in `{}`</sub>\n{}",
+    if !item.semantic {
+        return fenced(&item.detail);
+    }
+    let (quoted, explanation) = item.detail.split_once('\n').unwrap_or((&item.detail, ""));
+    format!(
+        "{}\n{}\n",
+        fenced(quoted),
+        explanation.replace("\nFix: ", "\n\n**Fix:** ")
+    )
+}
+
+fn body(item: &Item) -> String {
+    format!(
+        "**{}**\n\n{}\n{}\n<sub>Undercurrent rule `{}` in `{}`</sub>\n{}",
+        item.title,
+        item.prose,
+        detail(item),
         item.rule_id,
         item.rule_file,
         marker(item)
-    ));
-    out
+    )
 }
 
 pub fn plan(report: &Report, threads: &[Thread]) -> Plan {
