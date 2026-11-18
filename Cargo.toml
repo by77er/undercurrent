@@ -1,6 +1,6 @@
 [package]
 name = "undercurrent"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Layered, directory-scoped lint rules that push back on agent-written code"
 
