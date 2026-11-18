@@ -3,9 +3,17 @@ name: Release
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release from main, such as v0.1.0. It must match the version in Cargo.toml.
+        required: true
 
 permissions:
   contents: write
+
+env:
+  TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
 
 jobs:
   build:
@@ -23,10 +31,25 @@ jobs:
       TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v4
+      - name: Check the requested version
+        run: |
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$TAG' is not a version like v0.1.0; run the workflow again with one."
+            exit 1
+          fi
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$GITHUB_REF_NAME" != "main" ]; then
+            echo "::error::Releases are cut from main, not '$GITHUB_REF_NAME'; run the workflow again on main."
+            exit 1
+          fi
       - name: Build
         run: cargo build --release --locked
       - name: Check the binary's version matches the tag
-        run: test "v$(target/release/uc --version | cut -d' ' -f2)" = "$GITHUB_REF_NAME"
+        run: |
+          built="v$(target/release/uc --version | cut -d' ' -f2)"
+          if [ "$built" != "$TAG" ]; then
+            echo "::error::Cargo.toml builds $built but the release is $TAG; change the version in Cargo.toml or release $built."
+            exit 1
+          fi
       - name: Package
         run: tar -czf "uc-$TARGET.tar.gz" -C target/release uc
       - uses: actions/upload-artifact@v4
@@ -45,9 +68,9 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Create the release
-        run: gh release create "$GITHUB_REF_NAME" dist/*.tar.gz --title "$GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$TAG" dist/*.tar.gz --target "$GITHUB_SHA" --title "$TAG" --generate-notes
       - name: Move the major version tag
         run: |
-          major="${GITHUB_REF_NAME%%.*}"
-          git tag --force "$major"
+          major="${TAG%%.*}"
+          git tag --force "$major" "$GITHUB_SHA"
           git push --force origin "refs/tags/$major"
