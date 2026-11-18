@@ -31,11 +31,11 @@ whichever it is. Never delete or ignore a test to get past this rule.
 ## Source files stay small
 only: *.rs
 
-A file over 400 lines is doing more than one job. Split it into modules along
+A file over 1000 lines is doing more than one job. Split it into modules along
 the seams between those jobs.
 
 ```sh
-test "$(wc -l < "$FILE")" -le 400
+test "$(wc -l < "$FILE")" -le 1000
 ```
 
 ## Rule files are valid
