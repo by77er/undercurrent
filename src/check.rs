@@ -15,6 +15,7 @@ pub struct Outcome {
     pub files: usize,
     pub commands_run: usize,
     pub unevaluated: Vec<(String, String)>,
+    pub bootstrapped: bool,
 }
 
 const SAFE_PATH_PROSE: &str = "File paths may contain only letters, digits and `. _ - / @ +`. \
@@ -80,7 +81,12 @@ pub fn check(options: &Options) -> Result<Outcome> {
         (Some(base), true) => Source::Commit(base),
         _ => Source::WorkTree,
     };
-    let rule_files = resolve::load(&git, &source)?;
+    let mut rule_files = resolve::load(&git, &source)?;
+    let mut bootstrapped = false;
+    if rule_files.is_empty() && matches!(source, Source::Commit(_)) {
+        rule_files = resolve::load(&git, &Source::WorkTree)?;
+        bootstrapped = !rule_files.is_empty();
+    }
     ensure_valid(&rule_files)?;
 
     let (files, hostile): (Vec<String>, Vec<String>) =
@@ -124,6 +130,7 @@ pub fn check(options: &Options) -> Result<Outcome> {
         files: files.len(),
         commands_run: jobs.len(),
         unevaluated,
+        bootstrapped,
     })
 }
 

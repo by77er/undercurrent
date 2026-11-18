@@ -89,11 +89,3 @@ the same information could not be inferred.
 Every error, warning and finding the tool prints is read by a coding agent
 that will act on it. A message names the problem and the fix, not only the
 problem.
-
-```rust bad
-bail!("invalid base");
-```
-
-```rust good
-bail!("base `{base}` is not a known commit; fetch it first");
-```

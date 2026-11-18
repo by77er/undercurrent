@@ -31,6 +31,11 @@ fn summary(outcome: &Outcome) -> String {
             outcome.unevaluated.len()
         );
     }
+    if outcome.bootstrapped {
+        line.push_str(
+            " The base branch has no rule files, so this change was judged by the rules it adds.",
+        );
+    }
     line
 }
 
