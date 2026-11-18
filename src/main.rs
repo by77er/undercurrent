@@ -56,6 +56,11 @@ enum Commands {
             help = "Fail if semantic rules apply and no model API key is set"
         )]
         require_semantic: bool,
+        #[arg(
+            long,
+            help = "Also require CLAUDE.md, AGENTS.md and skill files to change in pull requests of their own, like rule files"
+        )]
+        separate_instructions: bool,
     },
     #[command(about = "List the rules that govern a path, and where each comes from")]
     Explain { path: String },
@@ -187,6 +192,7 @@ fn main() -> ExitCode {
             skip_commands,
             skip_semantic,
             require_semantic,
+            separate_instructions,
         } => check(&check::Options {
             base,
             all,
@@ -194,6 +200,7 @@ fn main() -> ExitCode {
             skip_commands,
             skip_semantic,
             require_semantic,
+            separate_instructions,
         }),
         Commands::Explain { path } => explain(&path),
         Commands::Validate => validate(),

@@ -19,10 +19,12 @@ jobs:
         uses: ./
         with:
           mode: commands
+          separate-instructions: "true"
       - if: github.event_name == 'push'
         uses: ./
         with:
           mode: commands
+          separate-instructions: "true"
           all: "true"
           rules-from: head
   semantic:
@@ -35,5 +37,6 @@ jobs:
       - uses: ./
         with:
           mode: semantic
+          separate-instructions: "true"
           typesafe-api-key: ${{ secrets.TYPESAFE_API_KEY }}
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}

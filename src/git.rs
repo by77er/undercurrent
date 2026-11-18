@@ -124,6 +124,26 @@ impl Git {
         Ok(self.on_disk(files))
     }
 
+    pub fn touched(&self, merge_base: &str) -> Result<Vec<String>> {
+        let mut files = split_nul(&self.run(&[
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            merge_base,
+            "--",
+        ])?);
+        files.extend(split_nul(&self.run(&[
+            "ls-files",
+            "-z",
+            "--others",
+            "--exclude-standard",
+        ])?));
+        files.sort();
+        files.dedup();
+        Ok(files)
+    }
+
     pub fn all_files(&self) -> Result<Vec<String>> {
         let files = split_nul(&self.run(&[
             "ls-files",

@@ -12,6 +12,7 @@ pub struct Options {
     pub skip_commands: bool,
     pub skip_semantic: bool,
     pub require_semantic: bool,
+    pub separate_instructions: bool,
 }
 
 #[derive(Default)]
@@ -28,6 +29,54 @@ pub struct Outcome {
 const SAFE_PATH_PROSE: &str = "File paths may contain only letters, digits and `. _ - / @ +`. \
 Paths are handed to rule commands, so anything else is refused rather than risk a shell \
 reading it as code. Rename the file.";
+
+const STAND_ALONE_PROSE: &str = "A pull request changes rule files or other files, never both. Rules are \
+loaded from the base branch, so a rule change does not apply to the pull request that makes it, and mixing \
+the two can hide a weakened rule among code. Move the rule changes into a pull request of their own and \
+merge it first.";
+const MAX_LISTED: usize = 10;
+
+fn is_guidance(path: &str, with_instructions: bool) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let rule_side = resolve::is_rule_file(path) || path == semantic::THRESHOLDS_FILE;
+    let in_skills = path.starts_with(".claude/skills/") || path.contains("/.claude/skills/");
+    let instruction = matches!(name, "CLAUDE.md" | "AGENTS.md" | "SKILL.md") || in_skills;
+    rule_side || (with_instructions && instruction)
+}
+
+fn listed(paths: &[&String]) -> String {
+    let mut shown: Vec<&str> = paths
+        .iter()
+        .take(MAX_LISTED)
+        .map(|path| path.as_str())
+        .collect();
+    if paths.len() > MAX_LISTED {
+        shown.push("...");
+    }
+    format!("{} ({})", shown.join(", "), paths.len())
+}
+
+fn mixed_change(touched: &[String], with_instructions: bool) -> Option<Finding> {
+    let (guidance, other): (Vec<&String>, Vec<&String>) = touched
+        .iter()
+        .partition(|path| is_guidance(path, with_instructions));
+    if guidance.is_empty() || other.is_empty() {
+        return None;
+    }
+    Some(Finding {
+        path: None,
+        line: None,
+        rule_id: "rule-changes-stand-alone".to_string(),
+        title: "Rule changes stand alone".to_string(),
+        rule_file: "built in".to_string(),
+        prose: STAND_ALONE_PROSE.to_string(),
+        detail: format!(
+            "rule and instruction files: {}\nother files: {}",
+            listed(&guidance),
+            listed(&other)
+        ),
+    })
+}
 
 fn is_safe_path(path: &str) -> bool {
     let allowed = |c: char| c.is_ascii_alphanumeric() || "._-/@+".contains(c);
@@ -148,6 +197,18 @@ pub fn check(options: &Options) -> Result<Outcome> {
         .map(|path| unsafe_path_finding(path))
         .collect();
     outcome.files = files.len();
+    if let (Some(base), Some(merge_base)) = (&base, &merge_base) {
+        let base_has_rules = git
+            .tree_files(base)?
+            .iter()
+            .any(|path| resolve::is_rule_file(path));
+        if base_has_rules {
+            let touched = git.touched(merge_base)?;
+            outcome
+                .findings
+                .extend(mixed_change(&touched, options.separate_instructions));
+        }
+    }
 
     if !options.skip_commands {
         let jobs = command_jobs(&rule_files, &files);
@@ -199,7 +260,36 @@ pub fn check(options: &Options) -> Result<Outcome> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_safe_path;
+    use super::{is_safe_path, mixed_change};
+
+    fn paths(list: &[&str]) -> Vec<String> {
+        list.iter().map(|path| path.to_string()).collect()
+    }
+
+    #[test]
+    fn rule_files_and_other_files_do_not_mix() {
+        assert!(mixed_change(&paths(&["src/UNDERCURRENT.md", "src/main.rs"]), false).is_some());
+        assert!(mixed_change(
+            &paths(&[".undercurrent/thresholds.json", "action.yml"]),
+            false
+        )
+        .is_some());
+        assert!(mixed_change(
+            &paths(&["UNDERCURRENT.md", ".undercurrent/thresholds.json"]),
+            false
+        )
+        .is_none());
+        assert!(mixed_change(&paths(&["src/main.rs", "src/check.rs"]), false).is_none());
+    }
+
+    #[test]
+    fn instruction_files_join_the_rule_side_only_on_request() {
+        let change = paths(&["CLAUDE.md", ".claude/skills/review/SKILL.md", "src/main.rs"]);
+        assert!(mixed_change(&change, false).is_none());
+        assert!(mixed_change(&change, true).is_some());
+        assert!(mixed_change(&paths(&["CLAUDE.md", "docs/UNDERCURRENT.md"]), true).is_none());
+        assert!(mixed_change(&paths(&["CLAUDE.md", "docs/UNDERCURRENT.md"]), false).is_some());
+    }
 
     #[test]
     fn hostile_paths_are_refused() {
