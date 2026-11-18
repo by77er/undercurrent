@@ -1,6 +1,8 @@
+use crate::api::Client;
 use crate::git::Git;
 use crate::resolve::{self, RuleFile, Source};
 use crate::run::{self, Finding, Job};
+use crate::semantic;
 use crate::validate;
 use anyhow::{bail, Result};
 
@@ -8,14 +10,20 @@ pub struct Options {
     pub base: Option<String>,
     pub all: bool,
     pub rules_from_base: bool,
+    pub skip_commands: bool,
+    pub skip_semantic: bool,
+    pub require_semantic: bool,
 }
 
+#[derive(Default)]
 pub struct Outcome {
     pub findings: Vec<Finding>,
     pub files: usize,
     pub commands_run: usize,
     pub unevaluated: Vec<(String, String)>,
+    pub unevaluated_reason: &'static str,
     pub bootstrapped: bool,
+    pub semantic: Option<semantic::Report>,
 }
 
 const SAFE_PATH_PROSE: &str = "File paths may contain only letters, digits and `. _ - / @ +`. \
@@ -63,43 +71,22 @@ fn ensure_valid(rule_files: &[RuleFile]) -> Result<()> {
     Ok(())
 }
 
-pub fn check(options: &Options) -> Result<Outcome> {
-    let git = Git::discover()?;
-    let base = if options.all && !options.rules_from_base {
-        None
-    } else {
-        Some(git.resolve_base(options.base.as_deref())?)
-    };
-    let mut files = match (&base, options.all) {
-        (Some(base), false) => git.changed(base)?,
-        _ => git.all_files()?,
-    };
-    let generated = git.generated(&files)?;
-    files.retain(|file| !generated.contains(file));
-
-    let source = match (&base, options.rules_from_base) {
-        (Some(base), true) => Source::Commit(base),
-        _ => Source::WorkTree,
-    };
-    let mut rule_files = resolve::load(&git, &source)?;
-    let mut bootstrapped = false;
-    if rule_files.is_empty() && matches!(source, Source::Commit(_)) {
-        rule_files = resolve::load(&git, &Source::WorkTree)?;
-        bootstrapped = !rule_files.is_empty();
+fn semantic_rules(rule_files: &[RuleFile], files: &[String]) -> Vec<(String, String)> {
+    let mut applicable = Vec::new();
+    for file in rule_files {
+        for rule in file.parsed.rules.iter().filter(|rule| rule.is_semantic()) {
+            if files.iter().any(|path| file.applies(rule, path)) {
+                applicable.push((file.path.clone(), rule.title.clone()));
+            }
+        }
     }
-    ensure_valid(&rule_files)?;
+    applicable
+}
 
-    let (files, hostile): (Vec<String>, Vec<String>) =
-        files.into_iter().partition(|f| is_safe_path(f));
-    let mut findings: Vec<Finding> = hostile
-        .iter()
-        .map(|path| unsafe_path_finding(path))
-        .collect();
-
+fn command_jobs<'a>(rule_files: &'a [RuleFile], files: &'a [String]) -> Vec<Job<'a>> {
     let mut jobs = Vec::new();
-    let mut unevaluated = Vec::new();
-    for file in &rule_files {
-        for rule in &file.parsed.rules {
+    for file in rule_files {
+        for rule in file.parsed.rules.iter().filter(|rule| !rule.is_semantic()) {
             let mut matching = files
                 .iter()
                 .filter(|path| file.applies(rule, path))
@@ -107,9 +94,7 @@ pub fn check(options: &Options) -> Result<Outcome> {
             if matching.peek().is_none() {
                 continue;
             }
-            if rule.is_semantic() {
-                unevaluated.push((file.path.clone(), rule.title.clone()));
-            } else if rule.per_file() {
+            if rule.per_file() {
                 jobs.extend(matching.map(|path| Job {
                     file,
                     rule,
@@ -124,14 +109,77 @@ pub fn check(options: &Options) -> Result<Outcome> {
             }
         }
     }
-    findings.extend(run::run_all(&jobs, git.root()));
-    Ok(Outcome {
-        findings,
-        files: files.len(),
-        commands_run: jobs.len(),
-        unevaluated,
-        bootstrapped,
-    })
+    jobs
+}
+
+pub fn check(options: &Options) -> Result<Outcome> {
+    let git = Git::discover()?;
+    let base = if options.all && !options.rules_from_base {
+        None
+    } else {
+        Some(git.resolve_base(options.base.as_deref())?)
+    };
+    let merge_base = match (&base, options.all) {
+        (Some(base), false) => Some(git.merge_base(base)?),
+        _ => None,
+    };
+    let mut files = match &merge_base {
+        Some(merge_base) => git.changed(merge_base)?,
+        None => git.all_files()?,
+    };
+    let generated = git.generated(&files)?;
+    files.retain(|file| !generated.contains(file));
+
+    let source = match (&base, options.rules_from_base) {
+        (Some(base), true) => Source::Commit(base),
+        _ => Source::WorkTree,
+    };
+    let mut rule_files = resolve::load(&git, &source)?;
+    let mut outcome = Outcome::default();
+    if rule_files.is_empty() && matches!(source, Source::Commit(_)) {
+        rule_files = resolve::load(&git, &Source::WorkTree)?;
+        outcome.bootstrapped = !rule_files.is_empty();
+    }
+    ensure_valid(&rule_files)?;
+
+    let (files, hostile): (Vec<String>, Vec<String>) =
+        files.into_iter().partition(|f| is_safe_path(f));
+    outcome.findings = hostile
+        .iter()
+        .map(|path| unsafe_path_finding(path))
+        .collect();
+    outcome.files = files.len();
+
+    if !options.skip_commands {
+        let jobs = command_jobs(&rule_files, &files);
+        outcome.commands_run = jobs.len();
+        outcome.findings.extend(run::run_all(&jobs, git.root()));
+    }
+
+    let applicable = semantic_rules(&rule_files, &files);
+    if applicable.is_empty() {
+        return Ok(outcome);
+    }
+    if options.skip_semantic {
+        outcome.unevaluated = applicable;
+        outcome.unevaluated_reason = "--skip-semantic was passed";
+        return Ok(outcome);
+    }
+    let Some(client) = Client::from_env() else {
+        if options.require_semantic {
+            bail!(
+                "{} semantic rule(s) apply but ANTHROPIC_API_KEY is not set; set it, or drop --require-semantic",
+                applicable.len()
+            );
+        }
+        outcome.unevaluated = applicable;
+        outcome.unevaluated_reason = "ANTHROPIC_API_KEY is not set";
+        return Ok(outcome);
+    };
+    let report = semantic::run(&client, &git, merge_base.as_deref(), &files, &rule_files)?;
+    outcome.findings.extend(report.findings.iter().cloned());
+    outcome.semantic = Some(report);
+    Ok(outcome)
 }
 
 #[cfg(test)]

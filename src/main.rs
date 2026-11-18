@@ -1,11 +1,14 @@
+mod api;
 mod check;
 mod git;
+mod pool;
 mod report;
 mod resolve;
 mod rules;
 #[cfg(test)]
 mod rules_tests;
 mod run;
+mod semantic;
 mod shell;
 mod validate;
 
@@ -41,6 +44,18 @@ enum Commands {
             help = "Load rule files from the base instead of the working tree, so a change cannot weaken the rules it is judged by"
         )]
         rules_from_base: bool,
+        #[arg(
+            long,
+            help = "Do not run command rules; use where code from the change must not execute"
+        )]
+        skip_commands: bool,
+        #[arg(long, help = "Do not judge semantic rules")]
+        skip_semantic: bool,
+        #[arg(
+            long,
+            help = "Fail if semantic rules apply and ANTHROPIC_API_KEY is not set"
+        )]
+        require_semantic: bool,
     },
     #[command(about = "List the rules that govern a path, and where each comes from")]
     Explain { path: String },
@@ -54,6 +69,13 @@ fn check(options: &check::Options) -> Result<bool> {
     if std::env::var_os("GITHUB_ACTIONS").is_some() {
         print!("{}", report::annotations(&outcome));
         report::write_step_summary(&outcome);
+    }
+    let failed_to_run = outcome
+        .semantic
+        .as_ref()
+        .is_some_and(|semantic| !semantic.errors.is_empty());
+    if failed_to_run {
+        anyhow::bail!("some semantic rules could not be judged, so the check is incomplete; see the errors above");
     }
     Ok(outcome.findings.is_empty())
 }
@@ -114,10 +136,16 @@ fn main() -> ExitCode {
             base,
             all,
             rules_from_base,
+            skip_commands,
+            skip_semantic,
+            require_semantic,
         } => check(&check::Options {
             base,
             all,
             rules_from_base,
+            skip_commands,
+            skip_semantic,
+            require_semantic,
         }),
         Commands::Explain { path } => explain(&path),
         Commands::Validate => validate(),

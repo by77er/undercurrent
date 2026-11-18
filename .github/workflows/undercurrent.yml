@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  check:
+  commands:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,8 +17,22 @@ jobs:
           fetch-depth: 0
       - if: github.event_name == 'pull_request'
         uses: ./
+        with:
+          mode: commands
       - if: github.event_name == 'push'
         uses: ./
         with:
+          mode: commands
           all: "true"
           rules-from: head
+  semantic:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./
+        with:
+          mode: semantic
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}

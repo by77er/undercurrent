@@ -86,19 +86,33 @@ impl Git {
         bail!("could not find a base branch; pass --base <ref>, or --all to check every file")
     }
 
-    pub fn changed(&self, base: &str) -> Result<Vec<String>> {
+    pub fn merge_base(&self, base: &str) -> Result<String> {
         let merge_base = self.run(&["merge-base", base, "HEAD"]).with_context(|| {
             format!(
                 "no common history between `{base}` and HEAD; in CI, check out with full history"
             )
         })?;
-        let merge_base = String::from_utf8_lossy(&merge_base).trim().to_string();
+        Ok(String::from_utf8_lossy(&merge_base).trim().to_string())
+    }
+
+    pub fn diff(&self, merge_base: &str, path: &str, context: u32) -> Result<String> {
+        let unified = format!("--unified={context}");
+        let out = self.run(&["diff", "--no-color", &unified, merge_base, "--", path])?;
+        Ok(String::from_utf8_lossy(&out).into_owned())
+    }
+
+    pub fn git_dir(&self) -> Result<PathBuf> {
+        let out = self.run(&["rev-parse", "--absolute-git-dir"])?;
+        Ok(PathBuf::from(String::from_utf8_lossy(&out).trim()))
+    }
+
+    pub fn changed(&self, merge_base: &str) -> Result<Vec<String>> {
         let mut files = split_nul(&self.run(&[
             "diff",
             "--name-only",
             "-z",
             "--diff-filter=d",
-            &merge_base,
+            merge_base,
             "--",
         ])?);
         files.extend(split_nul(&self.run(&[
