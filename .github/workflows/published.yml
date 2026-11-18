@@ -1,0 +1,20 @@
+name: Published action
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  commands:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: by77er/undercurrent@v0
+        with:
+          mode: commands
+          all: "true"
+          rules-from: head

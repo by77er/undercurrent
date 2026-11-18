@@ -1,5 +1,9 @@
 name: Undercurrent
 description: Run the repository's UNDERCURRENT.md rules against a pull request
+author: by77er
+branding:
+  icon: wind
+  color: blue
 inputs:
   base:
     description: Ref the change is measured against. Defaults to the pull request's base branch.
@@ -31,9 +35,45 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Build uc
+    - name: Install uc
       shell: bash
-      run: cargo build --release --locked --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml"
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        install_dir="$RUNNER_TEMP/undercurrent"
+        mkdir -p "$install_dir"
+        case "$RUNNER_OS-$RUNNER_ARCH" in
+          Linux-X64) target=linux-x86_64 ;;
+          Linux-ARM64) target=linux-aarch64 ;;
+          macOS-ARM64) target=macos-aarch64 ;;
+          *) target="" ;;
+        esac
+        repository=""
+        ref=""
+        case "$GITHUB_ACTION_PATH" in
+          */_actions/*/*/*)
+            checkout="${GITHUB_ACTION_PATH#*/_actions/}"
+            repository="$(printf '%s' "$checkout" | cut -d/ -f1-2)"
+            ref="$(printf '%s' "$checkout" | cut -d/ -f3-)"
+            ;;
+        esac
+        tag=""
+        case "$ref" in
+          v[0-9]*.[0-9]*.[0-9]*) tag="$ref" ;;
+          v[0-9]*)
+            tag="$(gh api "repos/$repository/releases" | jq -r --arg prefix "$ref." '[.[].tag_name | select(startswith($prefix))][0] // empty' || true)"
+            ;;
+        esac
+        archive="uc-$target.tar.gz"
+        if [ -n "$target" ] && [ -n "$tag" ] && gh release download "$tag" --repo "$repository" --pattern "$archive" --dir "$install_dir"; then
+          tar -xzf "$install_dir/$archive" -C "$install_dir"
+          echo "Installed uc $tag for $target."
+        else
+          echo "No prebuilt uc for ref '$ref' on $RUNNER_OS-$RUNNER_ARCH; building from source, which needs a Rust toolchain."
+          cargo build --release --locked --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml"
+          cp "$GITHUB_ACTION_PATH/target/release/uc" "$install_dir/uc"
+        fi
+        "$install_dir/uc" --version
     - name: Restore verdict cache
       if: inputs.mode != 'commands'
       uses: actions/cache/restore@v4
@@ -62,7 +102,7 @@ runs:
         if [ "$UC_ALL" = "true" ]; then args+=(--all); fi
         if [ "$UC_MODE" = "commands" ]; then args+=(--skip-semantic); fi
         if [ "$UC_MODE" = "semantic" ]; then args+=(--skip-commands); fi
-        "$GITHUB_ACTION_PATH/target/release/uc" check "${args[@]}"
+        "$RUNNER_TEMP/undercurrent/uc" check "${args[@]}"
     - name: Save verdict cache
       if: always() && inputs.mode != 'commands'
       uses: actions/cache/save@v4
