@@ -1,5 +1,3 @@
-//! Finding rule files and deciding which rules govern a path.
-
 use crate::git::Git;
 use crate::rules::{self, Parsed, Rule};
 use anyhow::Result;
@@ -8,9 +6,7 @@ use globset::GlobBuilder;
 pub const FILE_NAME: &str = "UNDERCURRENT.md";
 
 pub struct RuleFile {
-    /// Path of the rule file from the repository root.
     pub path: String,
-    /// Directory the rules govern; empty for the repository root.
     pub dir: String,
     pub parsed: Parsed,
 }
@@ -52,7 +48,6 @@ pub fn load(git: &Git, source: &Source) -> Result<Vec<RuleFile>> {
 }
 
 impl RuleFile {
-    /// `path` relative to this rule file's directory, if it lies inside it.
     pub fn relative<'a>(&self, path: &'a str) -> Option<&'a str> {
         if self.dir.is_empty() {
             return Some(path);
@@ -67,7 +62,6 @@ impl RuleFile {
         let Some(pattern) = &rule.only else {
             return true;
         };
-        // Like .gitignore: a pattern without a slash matches the file name alone.
         let subject = if pattern.contains('/') {
             relative
         } else {

@@ -1,5 +1,3 @@
-//! Checks that a parsed rule file is well formed before any rule runs.
-
 use crate::rules::{Parsed, Problem, Rule};
 use crate::shell;
 use std::collections::HashSet;
@@ -18,8 +16,6 @@ const THRESHOLD_WORDS: &[&str] = &[
     "no longer than",
 ];
 
-/// A model cannot count reliably, so prose that sets a numeric limit should
-/// be backed by a command.
 fn looks_countable(rule: &Rule) -> bool {
     let prose = format!("{} {}", rule.title, rule.prose).to_lowercase();
     prose.chars().any(|c| c.is_ascii_digit()) && THRESHOLD_WORDS.iter().any(|w| prose.contains(w))
@@ -82,7 +78,6 @@ fn check_rule(rule: &Rule, seen: &mut HashSet<String>, problems: &mut Vec<Proble
     }
 }
 
-/// All problems in a rule file: those found while parsing plus rule checks.
 pub fn problems(parsed: &Parsed) -> Vec<Problem> {
     let mut all = parsed.problems.clone();
     let mut seen = HashSet::new();

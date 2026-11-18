@@ -1,5 +1,3 @@
-//! `uc check`: pick the files, pick the rules, run them.
-
 use crate::git::Git;
 use crate::resolve::{self, RuleFile, Source};
 use crate::run::{self, Finding, Job};
@@ -16,7 +14,6 @@ pub struct Outcome {
     pub findings: Vec<Finding>,
     pub files: usize,
     pub commands_run: usize,
-    /// Rule file and title of each semantic rule that applied but was not judged.
     pub unevaluated: Vec<(String, String)>,
 }
 
@@ -43,8 +40,6 @@ fn unsafe_path_finding(path: &str) -> Finding {
     }
 }
 
-/// Refuses to run anything if a rule file is malformed: a broken rule must
-/// not silently stop applying.
 fn ensure_valid(rule_files: &[RuleFile]) -> Result<()> {
     let mut errors = Vec::new();
     for file in rule_files {

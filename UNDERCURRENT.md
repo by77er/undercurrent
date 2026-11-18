@@ -47,6 +47,35 @@ cargo run --quiet -- validate
 
 `uc validate` prints each problem with its line number.
 
+## Code carries no comments
+only: *.{rs,yml,toml}
+
+Delete the comment. If the code needs explaining, rename or restructure it
+until it does not; if a constraint must be recorded, write it as a rule in
+an `UNDERCURRENT.md` file.
+
+```sh
+case "$FILE" in
+  *.rs) ! grep -HnE '^[[:space:]]*//|[[:space:]]//[[:space:]]|/\*' "$FILE" ;;
+  *) ! grep -HnE '^[[:space:]]*#|[[:space:]]#[[:space:]]' "$FILE" ;;
+esac
+```
+
+## The only prose files are instructions
+only: *.md
+
+This repository holds code and instructions for agents, nothing else. Delete
+READMEs, design documents, changelogs and notes about removed code. Guidance
+that agents should follow belongs in `UNDERCURRENT.md`, `CLAUDE.md`,
+`AGENTS.md` or a skill.
+
+```sh
+case "$FILE" in
+  */UNDERCURRENT.md | */CLAUDE.md | */AGENTS.md | */SKILL.md) exit 0 ;;
+esac
+exit 1
+```
+
 ## The rule format never asks for what can be inferred
 
 A rule file states only what Undercurrent cannot work out for itself. Scope

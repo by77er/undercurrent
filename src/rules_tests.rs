@@ -12,7 +12,7 @@ db.query(\"select 1\");
 ```
 
 ```ts
-// an ordinary block stays in the prose
+let ordinary = true;
 ## not a heading
 ```
 

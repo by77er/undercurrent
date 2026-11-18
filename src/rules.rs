@@ -1,8 +1,3 @@
-//! Parsing of `UNDERCURRENT.md` rule files.
-//!
-//! A rule is a `## heading` followed by prose. An optional `sh` fenced block
-//! makes it a command rule; without one the rule is semantic.
-
 use crate::shell;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -32,8 +27,6 @@ impl Rule {
         self.commands.is_empty()
     }
 
-    /// A command that mentions `$FILE` runs once per changed file; any other
-    /// command runs once in the rule file's directory.
     pub fn per_file(&self) -> bool {
         self.command().is_some_and(shell::mentions_file)
     }
@@ -103,7 +96,6 @@ fn classify(info: &str) -> FenceKind {
     }
 }
 
-/// A `key: value` line directly under a rule heading.
 fn metadata(line: &str) -> Option<(&str, &str)> {
     let (key, value) = line.split_once(':')?;
     let key_ok = !key.is_empty() && key.chars().all(|c| c.is_ascii_lowercase() || c == '-');

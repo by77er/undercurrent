@@ -1,5 +1,3 @@
-//! Printing results for people, agents and GitHub.
-
 use crate::check::Outcome;
 use crate::run::Finding;
 use std::fmt::Write as _;
@@ -66,7 +64,6 @@ fn escape(value: &str, property: bool) -> String {
     out
 }
 
-/// GitHub workflow commands, which become annotations on the pull request.
 pub fn annotations(outcome: &Outcome) -> String {
     let mut out = String::new();
     for finding in &outcome.findings {
@@ -103,7 +100,6 @@ fn markdown(outcome: &Outcome) -> String {
     out
 }
 
-/// Appends a summary to the job page when running inside GitHub Actions.
 pub fn write_step_summary(outcome: &Outcome) {
     let Some(path) = std::env::var_os("GITHUB_STEP_SUMMARY") else {
         return;

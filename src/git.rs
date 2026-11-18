@@ -1,5 +1,3 @@
-//! Every call to git goes through this module.
-
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 use std::io::Write;
@@ -61,7 +59,6 @@ impl Git {
         .is_ok()
     }
 
-    /// The path from the repository root to the current directory, e.g. `src/`.
     pub fn prefix(&self) -> Result<String> {
         let out = Command::new("git")
             .args(["rev-parse", "--show-prefix"])
@@ -89,8 +86,6 @@ impl Git {
         bail!("could not find a base branch; pass --base <ref>, or --all to check every file")
     }
 
-    /// Files added or modified since the branch left `base`, including
-    /// uncommitted and untracked work.
     pub fn changed(&self, base: &str) -> Result<Vec<String>> {
         let merge_base = self.run(&["merge-base", base, "HEAD"]).with_context(|| {
             format!(
@@ -148,7 +143,6 @@ impl Git {
         Ok(String::from_utf8_lossy(&out).into_owned())
     }
 
-    /// The subset of `paths` marked `linguist-generated` in `.gitattributes`.
     pub fn generated(&self, paths: &[String]) -> Result<HashSet<String>> {
         let mut child = Command::new("git")
             .current_dir(&self.root)

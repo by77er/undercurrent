@@ -1,8 +1,3 @@
-//! Static checks on the `sh` blocks of command rules.
-//!
-//! `$FILE` holds a path chosen by the pull request's author, so a rule must
-//! never let the shell split, glob or re-evaluate it.
-
 fn file_var_at(bytes: &[u8], at: usize) -> Option<usize> {
     let rest = &bytes[at..];
     if rest.starts_with(b"${FILE}") {
@@ -25,7 +20,6 @@ struct Frame {
     parens: usize,
 }
 
-/// True if `$FILE` appears anywhere outside double quotes.
 pub fn unquoted_file_use(script: &str) -> bool {
     let bytes = script.as_bytes();
     let mut frames = vec![Frame::default()];
@@ -73,7 +67,6 @@ pub fn unquoted_file_use(script: &str) -> bool {
     false
 }
 
-/// Reasons a script could let a hostile filename run as code or as flags.
 pub fn problems(script: &str) -> Vec<String> {
     let mut found = Vec::new();
     if !mentions_file(script) {

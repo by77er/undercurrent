@@ -27,22 +27,24 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run the rules against changed files; exits 1 on any violation
+    #[command(about = "Run the rules against changed files; exits 1 on any violation")]
     Check {
-        /// Branch or commit the change is measured against
-        #[arg(long)]
+        #[arg(long, help = "Branch or commit the change is measured against")]
         base: Option<String>,
-        /// Check every file in the repository, not only changed ones
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Check every file in the repository, not only changed ones"
+        )]
         all: bool,
-        /// Load rule files from the base instead of the working tree, so a
-        /// change cannot weaken the rules it is judged by
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Load rule files from the base instead of the working tree, so a change cannot weaken the rules it is judged by"
+        )]
         rules_from_base: bool,
     },
-    /// List the rules that govern a path, and where each comes from
+    #[command(about = "List the rules that govern a path, and where each comes from")]
     Explain { path: String },
-    /// Check every rule file in the working tree for mistakes
+    #[command(about = "Check every rule file in the working tree for mistakes")]
     Validate,
 }
 
