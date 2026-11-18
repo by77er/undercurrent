@@ -56,9 +56,11 @@ an `UNDERCURRENT.md` file.
 
 ```sh
 case "$FILE" in
-  *.rs) ! grep -HnE '^[[:space:]]*//|[[:space:]]//[[:space:]]|(^|[[:space:]])/\*' "$FILE" ;;
-  *) ! grep -HnE '^[[:space:]]*#|[[:space:]]#[[:space:]]' "$FILE" ;;
+  *.rs) language=rust kinds='{any: [{kind: line_comment}, {kind: block_comment}]}' ;;
+  *.yml) language=yaml kinds='{kind: comment}' ;;
+  *) ! grep -HnE '^[[:space:]]*#|[[:space:]]#[[:space:]]' "$FILE"; exit ;;
 esac
+ast-grep scan --report-style short --inline-rules "{id: comment, language: $language, severity: error, message: delete this comment, rule: $kinds}" "$FILE"
 ```
 
 ## The only prose files are instructions
