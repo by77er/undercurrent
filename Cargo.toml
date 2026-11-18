@@ -1,0 +1,14 @@
+[package]
+name = "undercurrent"
+version = "0.1.0"
+edition = "2021"
+description = "Layered, directory-scoped lint rules that push back on agent-written code"
+
+[[bin]]
+name = "uc"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+globset = "0.4"

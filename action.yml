@@ -1,0 +1,36 @@
+name: Undercurrent
+description: Run the repository's UNDERCURRENT.md rules against a pull request
+inputs:
+  base:
+    description: Ref the change is measured against. Defaults to the pull request's base branch.
+    default: ""
+  rules-from:
+    description: >-
+      `base` loads rule files from the base branch, so a pull request cannot
+      weaken the rules it is judged by. `head` loads them from the checkout.
+    default: base
+  all:
+    description: Set to `true` to check every file instead of only changed ones.
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - name: Build uc
+      shell: bash
+      run: cargo build --release --locked --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml"
+    - name: Run rules
+      shell: bash
+      env:
+        UC_BASE: ${{ inputs.base }}
+        UC_RULES_FROM: ${{ inputs.rules-from }}
+        UC_ALL: ${{ inputs.all }}
+      run: |
+        args=()
+        base="$UC_BASE"
+        if [ -z "$base" ] && [ -n "${GITHUB_BASE_REF:-}" ]; then
+          base="origin/$GITHUB_BASE_REF"
+        fi
+        if [ -n "$base" ]; then args+=(--base "$base"); fi
+        if [ "$UC_RULES_FROM" = "base" ] && [ -n "$base" ]; then args+=(--rules-from-base); fi
+        if [ "$UC_ALL" = "true" ]; then args+=(--all); fi
+        "$GITHUB_ACTION_PATH/target/release/uc" check "${args[@]}"
