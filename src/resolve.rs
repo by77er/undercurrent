@@ -16,7 +16,7 @@ pub enum Source<'a> {
     Commit(&'a str),
 }
 
-fn is_rule_file(path: &str) -> bool {
+pub fn is_rule_file(path: &str) -> bool {
     path.rsplit('/').next() == Some(FILE_NAME)
 }
 

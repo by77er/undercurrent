@@ -21,6 +21,11 @@ inputs:
       `commands` runs only command rules, `semantic` judges only semantic
       rules without executing anything from the change, `all` does both.
     default: all
+  separate-instructions:
+    description: >-
+      Rule files must always change in pull requests of their own. Set to
+      `true` to require the same of CLAUDE.md, AGENTS.md and skill files.
+    default: "false"
   typesafe-api-key:
     description: >-
       TypeSafe API key. With it, the Jev decision model does the first pass
@@ -89,6 +94,7 @@ runs:
         UC_RULES_FROM: ${{ inputs.rules-from }}
         UC_ALL: ${{ inputs.all }}
         UC_MODE: ${{ inputs.mode }}
+        UC_SEPARATE: ${{ inputs.separate-instructions }}
         ANTHROPIC_API_KEY: ${{ inputs.mode != 'commands' && inputs.anthropic-api-key || '' }}
         TYPESAFE_API_KEY: ${{ inputs.mode != 'commands' && inputs.typesafe-api-key || '' }}
       run: |
@@ -100,6 +106,7 @@ runs:
         if [ -n "$base" ]; then args+=(--base "$base"); fi
         if [ "$UC_RULES_FROM" = "base" ] && [ -n "$base" ]; then args+=(--rules-from-base); fi
         if [ "$UC_ALL" = "true" ]; then args+=(--all); fi
+        if [ "$UC_SEPARATE" = "true" ]; then args+=(--separate-instructions); fi
         if [ "$UC_MODE" = "commands" ]; then args+=(--skip-semantic); fi
         if [ "$UC_MODE" = "semantic" ]; then args+=(--skip-commands); fi
         "$RUNNER_TEMP/undercurrent/uc" check "${args[@]}"
