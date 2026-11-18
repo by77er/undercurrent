@@ -62,6 +62,25 @@ fn anchor(line: &str, root: &Path, dir: &str) -> Option<(String, u32, String)> {
     Some((resolved, number, message.trim().to_string()))
 }
 
+fn anchors(output: &str, root: &Path, dir: &str) -> Vec<(String, u32, String)> {
+    let mut found = Vec::new();
+    let mut heading = "";
+    for line in output.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("error") || trimmed.starts_with("warning") {
+            heading = trimmed;
+        }
+        let pointed = trimmed
+            .strip_prefix("--> ")
+            .and_then(|place| anchor(place, root, dir));
+        match pointed {
+            Some((path, number, _)) => found.push((path, number, heading.to_string())),
+            None => found.extend(anchor(line, root, dir)),
+        }
+    }
+    found
+}
+
 fn clip(output: &str) -> String {
     let lines: Vec<&str> = output.trim().lines().collect();
     if lines.len() <= MAX_DETAIL_LINES {
@@ -100,9 +119,8 @@ fn run_job(job: &Job, root: &Path) -> Vec<Finding> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let anchored: Vec<Finding> = text
-        .lines()
-        .filter_map(|line| anchor(line, root, &job.file.dir))
+    let anchored: Vec<Finding> = anchors(&text, root, &job.file.dir)
+        .into_iter()
         .map(|(path, line, message)| job.finding(Some(path), Some(line), message))
         .collect();
     if anchored.is_empty() {
@@ -126,6 +144,27 @@ pub fn run_all(jobs: &[Job], root: &Path) -> Vec<Finding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compiler_pointers_take_the_message_above_them() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let output = "error: very complex type used\n  --> src/run.rs:58:32\n   |\n58 | fn x() {}\nnote: unrelated\n";
+        let expected = vec![(
+            "src/run.rs".to_string(),
+            58,
+            "error: very complex type used".to_string(),
+        )];
+        assert_eq!(anchors(output, root, ""), expected);
+        let plain = anchors("src/run.rs:4:5: error[no-comments]: comment\n", root, "");
+        assert_eq!(
+            plain,
+            vec![(
+                "src/run.rs".to_string(),
+                4,
+                "error[no-comments]: comment".to_string()
+            )]
+        );
+    }
 
     #[test]
     fn anchors_resolve_against_the_rule_directory() {

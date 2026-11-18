@@ -14,6 +14,7 @@ use crate::resolve::RuleFile;
 use crate::run::Finding;
 use anyhow::Result;
 use cache::{Cache, Stored};
+use hunks::Hunk;
 use jev::Jev;
 use review::{Candidate, SemRule};
 use std::collections::{BTreeMap, BTreeSet};
@@ -60,8 +61,13 @@ pub struct Report {
     pub uncertain: Vec<String>,
 }
 
-struct Pending {
+struct Unit {
     target: usize,
+    hunk: Hunk,
+}
+
+struct Pending {
+    unit: usize,
     rules: Vec<usize>,
 }
 
@@ -70,6 +76,7 @@ struct Review<'a> {
     thresholds: Thresholds,
     rules: Vec<SemRule<'a>>,
     targets: Vec<Target>,
+    units: Vec<Unit>,
     cache: Cache,
     stored: Vec<(usize, Stored)>,
     report: Report,
@@ -106,16 +113,16 @@ fn verify(raw: &review::Raw, targets: &[Target]) -> Option<Stored> {
 }
 
 fn unconfirmed(candidate: &Candidate, target: &Target, threshold: f64) -> Stored {
-    let span = if candidate.end > candidate.line {
-        format!("lines {}-{}", candidate.line, candidate.end)
-    } else {
-        format!("line {}", candidate.line)
-    };
+    let quoted = target
+        .lines
+        .get((candidate.line as usize).wrapping_sub(1))
+        .map(|line| line.trim())
+        .unwrap_or_default();
     let probability = candidate.probability.unwrap_or_default();
     let detail = format!(
-        "In changed {span}. A decision model judged this a violation with probability {probability:.2}, \
+        "{quoted}\nA decision model judged the changed hunk starting here a violation with probability {probability:.2}, \
          above the {threshold:.2} fitted to this rule's examples. No second reviewer checked it.\n\
-         Fix: change {span} to follow the rule. If they already comply, add them to the rule as a `good` \
+         Fix: change the hunk to follow the rule. If it already complies, add it to the rule as a `good` \
          example and run `uc test`, or set ANTHROPIC_API_KEY so a second reviewer confirms or dismisses this."
     );
     Stored {
@@ -129,7 +136,10 @@ fn merged(candidates: Vec<Candidate>) -> Vec<Candidate> {
     let mut groups: BTreeMap<(usize, Option<usize>, bool), Candidate> = BTreeMap::new();
     for candidate in candidates {
         match groups.get_mut(&(candidate.rule, candidate.target, candidate.spans_files)) {
-            Some(first) => first.reason = format!("{}; {}", first.reason, candidate.reason),
+            Some(first) => {
+                first.reason = format!("{}; {}", first.reason, candidate.reason);
+                first.units.extend(candidate.units);
+            }
             None => {
                 groups.insert(
                     (candidate.rule, candidate.target, candidate.spans_files),
@@ -142,14 +152,23 @@ fn merged(candidates: Vec<Candidate>) -> Vec<Candidate> {
 }
 
 impl Review<'_> {
-    fn key(&self, rule: usize, target: usize) -> String {
-        let (rule, target) = (&self.rules[rule], &self.targets[target]);
+    fn key(&self, rule: usize, unit: usize) -> String {
+        let (rule, unit) = (&self.rules[rule], &self.units[unit]);
+        let target = &self.targets[unit.target];
+        let hunk = &unit.hunk;
         let examples: String = rule
             .rule
             .examples
             .iter()
             .map(|e| format!("{}\u{0}{}\u{0}", e.good, e.code))
             .collect();
+        let code =
+            target.lines[hunk.context_start as usize - 1..hunk.context_end as usize].join("\n");
+        let span = format!(
+            "{}-{}",
+            hunk.start - hunk.context_start,
+            hunk.end - hunk.context_start
+        );
         cache::key(&[
             self.engines.tag(),
             &format!("{:?}", self.thresholds.get(rule)),
@@ -162,15 +181,40 @@ impl Review<'_> {
             &rule.rule.prose,
             &examples,
             &target.path,
-            &target.text(),
-            &target.diff,
+            &code,
+            &span,
         ])
+    }
+
+    fn remember(&mut self, rule: usize, unit: usize, hits: &[Stored]) {
+        let origin = self.units[unit].hunk.context_start;
+        let relative = hits.iter().map(|hit| Stored {
+            line: hit.line.saturating_sub(origin),
+            ..hit.clone()
+        });
+        let key = self.key(rule, unit);
+        self.cache.put(key, relative.collect());
+    }
+
+    fn recall(&mut self, rule: usize, unit: usize) -> Option<Vec<Stored>> {
+        let key = self.key(rule, unit);
+        let hits = self.cache.get(&key)?;
+        let (origin, path) = (
+            self.units[unit].hunk.context_start,
+            &self.targets[self.units[unit].target].path,
+        );
+        let absolute = hits.into_iter().map(|hit| Stored {
+            path: path.clone(),
+            line: origin + hit.line,
+            detail: hit.detail,
+        });
+        Some(absolute.collect())
     }
 
     fn pending(&mut self) -> Vec<Pending> {
         let mut pending = Vec::new();
-        for target in 0..self.targets.len() {
-            let path = &self.targets[target].path;
+        for unit in 0..self.units.len() {
+            let path = &self.targets[self.units[unit].target].path;
             let applicable: Vec<usize> = (0..self.rules.len())
                 .filter(|index| {
                     self.rules[*index]
@@ -181,8 +225,7 @@ impl Review<'_> {
             let mut fresh = Vec::new();
             for rule in applicable {
                 self.report.checks += 1;
-                let key = self.key(rule, target);
-                match self.cache.get(&key) {
+                match self.recall(rule, unit) {
                     Some(hits) => {
                         self.report.cached += 1;
                         self.stored.extend(hits.into_iter().map(|hit| (rule, hit)));
@@ -191,52 +234,98 @@ impl Review<'_> {
                 }
             }
             if !fresh.is_empty() {
-                pending.push(Pending {
-                    target,
-                    rules: fresh,
-                });
+                pending.push(Pending { unit, rules: fresh });
             }
         }
         pending
     }
 
-    fn triage(&mut self, pending: &[Pending]) -> Vec<Candidate> {
-        let (engines, rules, targets, thresholds) =
-            (self.engines, &self.rules, &self.targets, &self.thresholds);
-        let flag_at = |rule: usize| {
-            thresholds
-                .get(&rules[rule])
-                .map_or(FLAG_FOR_REVIEW_AT, |fitted| fitted.min(FLAG_FOR_REVIEW_AT))
-        };
-        let triaged = pool::map(pending, TRIAGE_WORKERS, |job| {
-            let target = &targets[job.target];
-            match (&engines.jev, &engines.claude) {
-                (Some(jev), _) => jev.triage(rules, &job.rules, job.target, target, &flag_at),
-                (None, Some(claude)) => {
-                    review::triage(claude, rules, &job.rules, job.target, target)
-                }
-                (None, None) => Ok(Vec::new()),
-            }
+    fn triage_with_jev(&mut self, jev: &Jev, pending: &[Pending]) -> Vec<Candidate> {
+        let (rules, targets, units) = (&self.rules, &self.targets, &self.units);
+        let judged = pool::map(pending, TRIAGE_WORKERS, |job| {
+            let unit = &units[job.unit];
+            jev.judge(rules, &job.rules, &targets[unit.target], &unit.hunk, None)
         });
         let mut candidates = Vec::new();
-        for (job, result) in pending.iter().zip(triaged) {
-            match result {
-                Ok(flagged) => {
-                    for rule in job
-                        .rules
-                        .iter()
-                        .filter(|rule| !flagged.iter().any(|c| c.rule == **rule))
-                    {
-                        let key = self.key(*rule, job.target);
-                        self.cache.put(key, Vec::new());
-                    }
-                    candidates.extend(flagged);
+        for (job, result) in pending.iter().zip(judged) {
+            let (target, hunk) = (
+                self.units[job.unit].target,
+                self.units[job.unit].hunk.clone(),
+            );
+            let verdicts = match result {
+                Ok(verdicts) => verdicts,
+                Err(err) => {
+                    self.report
+                        .errors
+                        .push(format!("{}: {err:#}", self.targets[target].path));
+                    continue;
                 }
-                Err(err) => self
-                    .report
-                    .errors
-                    .push(format!("{}: {err:#}", self.targets[job.target].path)),
+            };
+            for (rule, verdict) in job.rules.iter().zip(verdicts) {
+                let fitted = self.thresholds.get(&self.rules[*rule]);
+                let flag_at =
+                    fitted.map_or(FLAG_FOR_REVIEW_AT, |fitted| fitted.min(FLAG_FOR_REVIEW_AT));
+                let Some(unsettled) = verdict.flag(flag_at) else {
+                    self.remember(*rule, job.unit, &[]);
+                    continue;
+                };
+                let doubt = if unsettled {
+                    ", and judged that it depends on code outside the hunk"
+                } else {
+                    ""
+                };
+                candidates.push(Candidate {
+                    rule: *rule,
+                    target: Some(target),
+                    units: vec![job.unit],
+                    line: hunk.start,
+                    reason: format!("a decision model put the probability that {} break the rule at {:.2}{doubt}", hunk.span(), verdict.violates),
+                    probability: Some(verdict.violates),
+                    unsettled,
+                    ..Candidate::default()
+                });
             }
+        }
+        candidates
+    }
+
+    fn triage_with_claude(&mut self, claude: &Client, pending: &[Pending]) -> Vec<Candidate> {
+        let mut by_target: BTreeMap<usize, BTreeMap<usize, Vec<usize>>> = BTreeMap::new();
+        for job in pending {
+            let per_rule = by_target.entry(self.units[job.unit].target).or_default();
+            for rule in &job.rules {
+                per_rule.entry(*rule).or_default().push(job.unit);
+            }
+        }
+        let jobs: Vec<(usize, Vec<usize>)> = by_target
+            .iter()
+            .map(|(target, per_rule)| (*target, per_rule.keys().copied().collect()))
+            .collect();
+        let (rules, targets) = (&self.rules, &self.targets);
+        let triaged = pool::map(&jobs, TRIAGE_WORKERS, |(target, indices)| {
+            review::triage(claude, rules, indices, *target, &targets[*target])
+        });
+        let mut candidates = Vec::new();
+        for ((target, indices), result) in jobs.iter().zip(triaged) {
+            let mut flagged = match result {
+                Ok(flagged) => flagged,
+                Err(err) => {
+                    self.report
+                        .errors
+                        .push(format!("{}: {err:#}", self.targets[*target].path));
+                    continue;
+                }
+            };
+            for rule in indices {
+                let units = by_target[target][rule].clone();
+                match flagged.iter_mut().find(|candidate| candidate.rule == *rule) {
+                    Some(candidate) => candidate.units = units,
+                    None => units
+                        .iter()
+                        .for_each(|unit| self.remember(*rule, *unit, &[])),
+                }
+            }
+            candidates.extend(flagged);
         }
         candidates
     }
@@ -291,32 +380,52 @@ impl Review<'_> {
             )
         });
         for (candidate, result) in candidates.iter().zip(confirmed) {
-            match result {
-                Ok(raw) => {
-                    let verified: Vec<Stored> = raw
-                        .iter()
-                        .filter_map(|raw| verify(raw, &self.targets))
-                        .collect();
-                    if let Some(target) = candidate.target.filter(|_| !candidate.spans_files) {
-                        let key = self.key(candidate.rule, target);
-                        self.cache.put(key, verified.clone());
-                    }
-                    self.stored
-                        .extend(verified.into_iter().map(|hit| (candidate.rule, hit)));
+            let raw = match result {
+                Ok(raw) => raw,
+                Err(err) => {
+                    self.report.errors.push(format!(
+                        "{}: {err:#}",
+                        self.rules[candidate.rule].rule.title
+                    ));
+                    continue;
                 }
-                Err(err) => self.report.errors.push(format!(
-                    "{}: {err:#}",
-                    self.rules[candidate.rule].rule.title
-                )),
+            };
+            let verified: Vec<Stored> = raw
+                .iter()
+                .filter_map(|raw| verify(raw, &self.targets))
+                .collect();
+            if !candidate.spans_files {
+                self.remember_confirmed(candidate, &verified);
             }
+            self.stored
+                .extend(verified.into_iter().map(|hit| (candidate.rule, hit)));
+        }
+    }
+
+    fn remember_confirmed(&mut self, candidate: &Candidate, verified: &[Stored]) {
+        let mut by_unit: BTreeMap<usize, Vec<Stored>> = candidate
+            .units
+            .iter()
+            .map(|unit| (*unit, Vec::new()))
+            .collect();
+        for hit in verified {
+            let holds = |unit: &Unit| {
+                self.targets[unit.target].path == hit.path
+                    && (unit.hunk.start..=unit.hunk.end).contains(&hit.line)
+            };
+            if let Some(unit) = (0..self.units.len()).find(|index| holds(&self.units[*index])) {
+                by_unit.entry(unit).or_default().push(hit.clone());
+            }
+        }
+        for (unit, hits) in by_unit {
+            self.remember(candidate.rule, unit, &hits);
         }
     }
 
     fn accept(&mut self, candidates: &[Candidate]) {
-        let mut blocked: BTreeMap<(usize, usize), Vec<Stored>> = BTreeMap::new();
-        let mut advisory: BTreeSet<(usize, usize)> = BTreeSet::new();
         for candidate in candidates {
-            let Some(target) = candidate.target else {
+            let (Some(target), Some(unit)) = (candidate.target, candidate.units.first().copied())
+            else {
                 continue;
             };
             let probability = candidate.probability.unwrap_or_default();
@@ -329,14 +438,11 @@ impl Review<'_> {
                 }
                 Some(threshold) => {
                     let hit = unconfirmed(candidate, &self.targets[target], threshold);
-                    blocked
-                        .entry((candidate.rule, target))
-                        .or_default()
-                        .push(hit);
+                    self.remember(candidate.rule, unit, std::slice::from_ref(&hit));
+                    self.stored.push((candidate.rule, hit));
                     continue;
                 }
             };
-            advisory.insert((candidate.rule, target));
             let (path, title) = (
                 &self.targets[target].path,
                 &self.rules[candidate.rule].rule.title,
@@ -345,13 +451,6 @@ impl Review<'_> {
                 "{path}:{}: {title} (probability {probability:.2}; {why})",
                 candidate.line
             ));
-        }
-        for ((rule, target), hits) in blocked {
-            if !advisory.contains(&(rule, target)) {
-                let key = self.key(rule, target);
-                self.cache.put(key, hits.clone());
-            }
-            self.stored.extend(hits.into_iter().map(|hit| (rule, hit)));
         }
     }
 }
@@ -428,18 +527,32 @@ pub fn run(
         files: &all_files,
     };
     let thresholds = Thresholds::parse(fitted);
+    let units: Vec<Unit> = targets
+        .iter()
+        .enumerate()
+        .flat_map(|(target, loaded)| {
+            hunks::hunks(loaded)
+                .into_iter()
+                .map(move |hunk| Unit { target, hunk })
+        })
+        .collect();
     let mut review = Review {
         engines,
         thresholds,
         rules,
         targets,
+        units,
         cache: Cache::load(git),
         stored: Vec::new(),
         report,
     };
 
     let pending = review.pending();
-    let mut candidates = review.triage(&pending);
+    let mut candidates = match (&engines.jev, &engines.claude) {
+        (Some(jev), _) => review.triage_with_jev(jev, &pending),
+        (None, Some(claude)) => review.triage_with_claude(claude, &pending),
+        (None, None) => Vec::new(),
+    };
     match &engines.claude {
         Some(claude) => {
             candidates.extend(review.whole_change(claude));

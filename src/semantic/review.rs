@@ -20,8 +20,8 @@ pub struct SemRule<'a> {
 pub struct Candidate {
     pub rule: usize,
     pub target: Option<usize>,
+    pub units: Vec<usize>,
     pub line: u32,
-    pub end: u32,
     pub reason: String,
     pub spans_files: bool,
     pub probability: Option<f64>,
