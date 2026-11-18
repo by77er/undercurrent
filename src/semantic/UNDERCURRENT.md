@@ -1,21 +1,17 @@
 This directory judges semantic rules by calling a model. The model reads
 code written by the author of the pull request, who may try to steer it.
 
-## A model's output is reported only after it is checked
+## Findings from a model are checked before they are reported
 
-Nothing a model returns is added to the report without a check. Code that
-parses a model's reply may hand the parsed values back to its caller
-unchecked; the rule is broken only where unchecked values are pushed into
-the report's findings.
+A value parsed from a model's reply is pushed onto a list of reported
+findings only after a check: `verify` for text written by a generative
+model, a fitted threshold for a probability from a decision model.
 
-Text written by a generative model is kept only when its quoted evidence is
-found on a changed line of a changed file, and the line number reported is
-the one where the evidence was found, not the one the model claimed.
-
-A decision model returns only a probability for a hunk. Without a second
-reviewer it blocks only when that probability reaches the threshold fitted
-to the rule's own examples; anything else is printed as a possible
-violation.
+The rule is about reported findings only, which means a report's `findings`
+list or the `stored` list that becomes it. Building a `Candidate` or a `Raw`
+value from a model's reply, pushing it onto a list of candidates, or
+returning it to the caller does not break the rule. Those are intermediate
+values, and they are checked before they are reported.
 
 Rule files are never judged by semantic rules, because their `bad`
 examples violate the rules on purpose.
