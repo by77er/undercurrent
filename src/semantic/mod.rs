@@ -84,6 +84,7 @@ fn finding(rule: &SemRule, stored: &Stored) -> Finding {
         rule_file: rule.file.path.clone(),
         prose: rule.rule.prose.clone(),
         detail: stored.detail.clone(),
+        semantic: true,
     }
 }
 
@@ -367,6 +368,10 @@ fn semantic_rules(rule_files: &[RuleFile]) -> Vec<SemRule<'_>> {
 }
 
 pub const THRESHOLDS_FILE: &str = thresholds::FILE;
+
+pub fn digest(parts: &[&str]) -> String {
+    cache::key(parts)
+}
 
 pub fn test(git: &Git, rule_files: &[RuleFile]) -> Result<Vec<thresholds::Fit>> {
     let Some(jev) = Jev::from_env() else {

@@ -15,6 +15,7 @@ pub struct Finding {
     pub rule_file: String,
     pub prose: String,
     pub detail: String,
+    pub semantic: bool,
 }
 
 pub struct Job<'a> {
@@ -33,6 +34,7 @@ impl Job<'_> {
             rule_file: self.file.path.clone(),
             prose: self.rule.prose.clone(),
             detail,
+            semantic: false,
         }
     }
 }

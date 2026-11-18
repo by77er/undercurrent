@@ -40,3 +40,15 @@ jobs:
           separate-instructions: "true"
           typesafe-api-key: ${{ secrets.TYPESAFE_API_KEY }}
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+  review:
+    if: always() && github.event_name == 'pull_request'
+    needs: [commands, semantic]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          mode: review

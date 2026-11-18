@@ -24,6 +24,8 @@ pub struct Outcome {
     pub unevaluated_reason: &'static str,
     pub bootstrapped: bool,
     pub semantic: Option<semantic::Report>,
+    pub commands_complete: bool,
+    pub semantic_complete: bool,
 }
 
 const SAFE_PATH_PROSE: &str = "File paths may contain only letters, digits and `. _ - / @ +`. \
@@ -75,6 +77,7 @@ fn mixed_change(touched: &[String], with_instructions: bool) -> Option<Finding> 
             listed(&guidance),
             listed(&other)
         ),
+        semantic: false,
     })
 }
 
@@ -94,6 +97,7 @@ fn unsafe_path_finding(path: &str) -> Finding {
         rule_file: "built in".to_string(),
         prose: SAFE_PATH_PROSE.to_string(),
         detail: format!("offending path: {path:?}"),
+        semantic: false,
     }
 }
 
@@ -210,6 +214,7 @@ pub fn check(options: &Options) -> Result<Outcome> {
         }
     }
 
+    outcome.commands_complete = !options.skip_commands;
     if !options.skip_commands {
         let jobs = command_jobs(&rule_files, &files);
         outcome.commands_run = jobs.len();
@@ -218,6 +223,7 @@ pub fn check(options: &Options) -> Result<Outcome> {
 
     let applicable = semantic_rules(&rule_files, &files);
     if applicable.is_empty() {
+        outcome.semantic_complete = !options.skip_semantic;
         return Ok(outcome);
     }
     if options.skip_semantic {
@@ -254,6 +260,7 @@ pub fn check(options: &Options) -> Result<Outcome> {
         &fitted,
     )?;
     outcome.findings.extend(report.findings.iter().cloned());
+    outcome.semantic_complete = report.errors.is_empty();
     outcome.semantic = Some(report);
     Ok(outcome)
 }

@@ -20,12 +20,19 @@ inputs:
     description: >-
       `commands` runs only command rules, `semantic` judges only semantic
       rules without executing anything from the change, `all` does both.
+      `review` runs nothing: it posts the findings of the other jobs on the
+      pull request as review comments. Its job needs `pull-requests: write`
+      and a checkout. With `contents: write` as well it resolves the threads
+      of fixed findings; without it, it edits their comments to say so.
     default: all
   separate-instructions:
     description: >-
       Rule files must always change in pull requests of their own. Set to
       `true` to require the same of CLAUDE.md, AGENTS.md and skill files.
     default: "false"
+  github-token:
+    description: Token used in `review` mode to post and resolve comments.
+    default: ${{ github.token }}
   typesafe-api-key:
     description: >-
       TypeSafe API key. With it, the Jev decision model does the first pass
@@ -80,7 +87,7 @@ runs:
         fi
         "$install_dir/uc" --version
     - name: Restore verdict cache
-      if: inputs.mode != 'commands'
+      if: inputs.mode != 'commands' && inputs.mode != 'review'
       uses: actions/cache/restore@v4
       with:
         path: .git/undercurrent-cache.json
@@ -88,6 +95,7 @@ runs:
         restore-keys: |
           undercurrent-${{ github.event.pull_request.number || github.ref_name }}-
     - name: Run rules
+      if: inputs.mode != 'review'
       shell: bash
       env:
         UC_BASE: ${{ inputs.base }}
@@ -109,10 +117,33 @@ runs:
         if [ "$UC_SEPARATE" = "true" ]; then args+=(--separate-instructions); fi
         if [ "$UC_MODE" = "commands" ]; then args+=(--skip-semantic); fi
         if [ "$UC_MODE" = "semantic" ]; then args+=(--skip-commands); fi
+        args+=(--findings "$RUNNER_TEMP/undercurrent/findings-$UC_MODE.json")
         "$RUNNER_TEMP/undercurrent/uc" check "${args[@]}"
     - name: Save verdict cache
-      if: always() && inputs.mode != 'commands'
+      if: always() && inputs.mode != 'commands' && inputs.mode != 'review'
       uses: actions/cache/save@v4
       with:
         path: .git/undercurrent-cache.json
         key: undercurrent-${{ github.event.pull_request.number || github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+    - name: Keep the findings for the review job
+      if: always() && inputs.mode != 'review'
+      uses: actions/upload-artifact@v4
+      with:
+        name: undercurrent-findings-${{ inputs.mode }}
+        path: ${{ runner.temp }}/undercurrent/findings-*.json
+        if-no-files-found: ignore
+    - name: Fetch the findings
+      if: inputs.mode == 'review'
+      uses: actions/download-artifact@v4
+      with:
+        pattern: undercurrent-findings-*
+        path: ${{ runner.temp }}/undercurrent/findings
+        merge-multiple: true
+    - name: Comment on the pull request
+      if: inputs.mode == 'review'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        shopt -s nullglob
+        "$RUNNER_TEMP/undercurrent/uc" comment "$RUNNER_TEMP"/undercurrent/findings/*.json
