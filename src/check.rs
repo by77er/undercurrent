@@ -175,7 +175,22 @@ pub fn check(options: &Options) -> Result<Outcome> {
         outcome.unevaluated_reason = "neither TYPESAFE_API_KEY nor ANTHROPIC_API_KEY is set";
         return Ok(outcome);
     };
-    let report = semantic::run(&engines, &git, merge_base.as_deref(), &files, &rule_files)?;
+    let fitted = match (&source, outcome.bootstrapped) {
+        (Source::Commit(reference), false) => git
+            .show(reference, semantic::THRESHOLDS_FILE)
+            .unwrap_or_default(),
+        _ => {
+            std::fs::read_to_string(git.root().join(semantic::THRESHOLDS_FILE)).unwrap_or_default()
+        }
+    };
+    let report = semantic::run(
+        &engines,
+        &git,
+        merge_base.as_deref(),
+        &files,
+        &rule_files,
+        &fitted,
+    )?;
     outcome.findings.extend(report.findings.iter().cloned());
     outcome.semantic = Some(report);
     Ok(outcome)

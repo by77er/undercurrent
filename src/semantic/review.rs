@@ -16,13 +16,16 @@ pub struct SemRule<'a> {
     pub rule: &'a Rule,
 }
 
+#[derive(Default)]
 pub struct Candidate {
     pub rule: usize,
     pub target: Option<usize>,
     pub line: u32,
+    pub end: u32,
     pub reason: String,
     pub spans_files: bool,
     pub probability: Option<f64>,
+    pub unsettled: bool,
 }
 
 pub struct Raw {
@@ -114,8 +117,7 @@ pub fn triage(
             target: Some(target_index),
             line: line_of(verdict),
             reason: verdict["reason"].as_str().unwrap_or_default().to_string(),
-            spans_files: false,
-            probability: None,
+            ..Candidate::default()
         });
     }
     for (local, index) in indices.iter().enumerate() {
@@ -126,10 +128,8 @@ pub fn triage(
             candidates.push(Candidate {
                 rule: *index,
                 target,
-                line: 0,
                 reason,
-                spans_files: false,
-                probability: None,
+                ..Candidate::default()
             });
         }
     }
@@ -179,7 +179,7 @@ pub fn whole(
                 verdict["reason"].as_str().unwrap_or_default()
             ),
             spans_files: true,
-            probability: None,
+            ..Candidate::default()
         });
     }
     Ok(candidates)

@@ -1,8 +1,10 @@
 mod cache;
+mod hunks;
 mod jev;
 mod prompt;
 mod review;
 mod target;
+mod thresholds;
 mod tools;
 
 use crate::api::Client;
@@ -14,15 +16,15 @@ use anyhow::Result;
 use cache::{Cache, Stored};
 use jev::Jev;
 use review::{Candidate, SemRule};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use target::{Loaded, Target};
+use thresholds::Thresholds;
 use tools::Workspace;
 
 const TRIAGE_WORKERS: usize = 8;
 const CONFIRM_WORKERS: usize = 4;
 const MAX_WHOLE_BYTES: usize = 300_000;
 const FLAG_FOR_REVIEW_AT: f64 = 0.5;
-const BLOCK_ALONE_AT: f64 = 0.85;
 
 pub struct Engines {
     jev: Option<Jev>,
@@ -65,6 +67,7 @@ struct Pending {
 
 struct Review<'a> {
     engines: &'a Engines,
+    thresholds: Thresholds,
     rules: Vec<SemRule<'a>>,
     targets: Vec<Target>,
     cache: Cache,
@@ -101,25 +104,38 @@ fn verify(raw: &review::Raw, targets: &[Target]) -> Option<Stored> {
     })
 }
 
-fn unconfirmed(candidate: &Candidate, target: &Target) -> Stored {
-    let line = Some(candidate.line)
-        .filter(|line| target.is_changed(*line))
-        .unwrap_or(0);
-    let quoted = target
-        .lines
-        .get((line as usize).wrapping_sub(1))
-        .map(|text| text.trim())
-        .unwrap_or_default();
+fn unconfirmed(candidate: &Candidate, target: &Target, threshold: f64) -> Stored {
+    let span = if candidate.end > candidate.line {
+        format!("lines {}-{}", candidate.line, candidate.end)
+    } else {
+        format!("line {}", candidate.line)
+    };
     let probability = candidate.probability.unwrap_or_default();
     let detail = format!(
-        "{quoted}\nA decision model judged this a likely violation (probability {probability:.2}). \
-         No second reviewer checked it, so read the rule against this line before changing code."
+        "In changed {span}. A decision model judged this a violation with probability {probability:.2}, \
+         above the {threshold:.2} fitted to this rule's examples. No second reviewer checked it."
     );
     Stored {
         path: target.path.clone(),
-        line,
-        detail: detail.trim().to_string(),
+        line: candidate.line,
+        detail,
     }
+}
+
+fn merged(candidates: Vec<Candidate>) -> Vec<Candidate> {
+    let mut groups: BTreeMap<(usize, Option<usize>, bool), Candidate> = BTreeMap::new();
+    for candidate in candidates {
+        match groups.get_mut(&(candidate.rule, candidate.target, candidate.spans_files)) {
+            Some(first) => first.reason = format!("{}; {}", first.reason, candidate.reason),
+            None => {
+                groups.insert(
+                    (candidate.rule, candidate.target, candidate.spans_files),
+                    candidate,
+                );
+            }
+        }
+    }
+    groups.into_values().collect()
 }
 
 impl Review<'_> {
@@ -133,6 +149,7 @@ impl Review<'_> {
             .collect();
         cache::key(&[
             self.engines.tag(),
+            &format!("{:?}", self.thresholds.get(rule)),
             jev::MODEL,
             prompt::VERSION,
             prompt::TRIAGE_MODEL,
@@ -181,13 +198,17 @@ impl Review<'_> {
     }
 
     fn triage(&mut self, pending: &[Pending]) -> Vec<Candidate> {
-        let (engines, rules, targets) = (self.engines, &self.rules, &self.targets);
+        let (engines, rules, targets, thresholds) =
+            (self.engines, &self.rules, &self.targets, &self.thresholds);
+        let flag_at = |rule: usize| {
+            thresholds
+                .get(&rules[rule])
+                .map_or(FLAG_FOR_REVIEW_AT, |fitted| fitted.min(FLAG_FOR_REVIEW_AT))
+        };
         let triaged = pool::map(pending, TRIAGE_WORKERS, |job| {
             let target = &targets[job.target];
             match (&engines.jev, &engines.claude) {
-                (Some(jev), _) => {
-                    jev.triage(rules, &job.rules, job.target, target, FLAG_FOR_REVIEW_AT)
-                }
+                (Some(jev), _) => jev.triage(rules, &job.rules, job.target, target, &flag_at),
                 (None, Some(claude)) => {
                     review::triage(claude, rules, &job.rules, job.target, target)
                 }
@@ -289,25 +310,77 @@ impl Review<'_> {
     }
 
     fn accept(&mut self, candidates: &[Candidate]) {
+        let mut blocked: BTreeMap<(usize, usize), Vec<Stored>> = BTreeMap::new();
+        let mut advisory: BTreeSet<(usize, usize)> = BTreeSet::new();
         for candidate in candidates {
             let Some(target) = candidate.target else {
                 continue;
             };
-            let hit = unconfirmed(candidate, &self.targets[target]);
             let probability = candidate.probability.unwrap_or_default();
-            if probability < BLOCK_ALONE_AT {
-                let title = &self.rules[candidate.rule].rule.title;
-                self.report.uncertain.push(format!(
-                    "{}:{}: {title} (probability {probability:.2})",
-                    hit.path, hit.line
-                ));
-                continue;
+            let fitted = self.thresholds.get(&self.rules[candidate.rule]);
+            let why = match fitted {
+                _ if candidate.unsettled => "it depends on code outside the hunk".to_string(),
+                None => "the rule has no fitted threshold".to_string(),
+                Some(threshold) if probability < threshold => {
+                    format!("below the rule's threshold of {threshold:.2}")
+                }
+                Some(threshold) => {
+                    let hit = unconfirmed(candidate, &self.targets[target], threshold);
+                    blocked
+                        .entry((candidate.rule, target))
+                        .or_default()
+                        .push(hit);
+                    continue;
+                }
+            };
+            advisory.insert((candidate.rule, target));
+            let (path, title) = (
+                &self.targets[target].path,
+                &self.rules[candidate.rule].rule.title,
+            );
+            self.report.uncertain.push(format!(
+                "{path}:{}: {title} (probability {probability:.2}; {why})",
+                candidate.line
+            ));
+        }
+        for ((rule, target), hits) in blocked {
+            if !advisory.contains(&(rule, target)) {
+                let key = self.key(rule, target);
+                self.cache.put(key, hits.clone());
             }
-            let key = self.key(candidate.rule, target);
-            self.cache.put(key, vec![hit.clone()]);
-            self.stored.push((candidate.rule, hit));
+            self.stored.extend(hits.into_iter().map(|hit| (rule, hit)));
         }
     }
+}
+
+fn semantic_rules(rule_files: &[RuleFile]) -> Vec<SemRule<'_>> {
+    let rules = rule_files.iter().flat_map(|file| {
+        file.parsed
+            .rules
+            .iter()
+            .filter(|rule| rule.is_semantic())
+            .map(move |rule| SemRule { file, rule })
+    });
+    rules.collect()
+}
+
+pub const THRESHOLDS_FILE: &str = thresholds::FILE;
+
+pub fn test(git: &Git, rule_files: &[RuleFile]) -> Result<Vec<thresholds::Fit>> {
+    let Some(jev) = Jev::from_env() else {
+        anyhow::bail!("uc test scores rule examples with Jev and TYPESAFE_API_KEY is not set; set it and run again");
+    };
+    let rules = semantic_rules(rule_files);
+    let with_examples: Vec<&SemRule> = rules
+        .iter()
+        .filter(|rule| !rule.rule.examples.is_empty())
+        .collect();
+    let fits = pool::map(&with_examples, TRIAGE_WORKERS, |rule| {
+        thresholds::fit(&jev, rule)
+    });
+    let fits = fits.into_iter().collect::<Result<Vec<_>>>()?;
+    thresholds::write(git.root(), &fits)?;
+    Ok(fits)
 }
 
 fn load_targets(
@@ -319,7 +392,8 @@ fn load_targets(
 ) -> Result<Vec<Target>> {
     let mut targets = Vec::new();
     for path in files {
-        if !rules.iter().any(|rule| rule.file.applies(rule.rule, path)) {
+        let is_rule_file = path.rsplit('/').next() == Some(crate::resolve::FILE_NAME);
+        if is_rule_file || !rules.iter().any(|rule| rule.file.applies(rule.rule, path)) {
             continue;
         }
         match Target::load(git, merge_base, path)? {
@@ -336,26 +410,20 @@ pub fn run(
     merge_base: Option<&str>,
     files: &[String],
     rule_files: &[RuleFile],
+    fitted: &str,
 ) -> Result<Report> {
     let mut report = Report::default();
-    let rules: Vec<SemRule> = rule_files
-        .iter()
-        .flat_map(|file| {
-            file.parsed
-                .rules
-                .iter()
-                .filter(|rule| rule.is_semantic())
-                .map(move |rule| SemRule { file, rule })
-        })
-        .collect();
+    let rules = semantic_rules(rule_files);
     let targets = load_targets(git, merge_base, files, &rules, &mut report)?;
     let all_files: BTreeSet<String> = git.all_files()?.into_iter().collect();
     let workspace = Workspace {
         root: git.root(),
         files: &all_files,
     };
+    let thresholds = Thresholds::parse(fitted);
     let mut review = Review {
         engines,
+        thresholds,
         rules,
         targets,
         cache: Cache::load(git),
@@ -368,6 +436,7 @@ pub fn run(
     match &engines.claude {
         Some(claude) => {
             candidates.extend(review.whole_change(claude));
+            candidates = merged(candidates);
             review.confirm(claude, &workspace, &candidates);
         }
         None => review.accept(&candidates),
@@ -376,8 +445,9 @@ pub fn run(
     if !review.report.uncertain.is_empty() {
         review.report.uncertain.sort();
         review.report.notes.push(format!(
-            "{} possible violation(s) fell below the {BLOCK_ALONE_AT} probability needed to block without a second \
-             reviewer, so they did not fail the check; set ANTHROPIC_API_KEY to have each one confirmed or dismissed",
+            "{} possible violation(s) did not fail the check. Without a second reviewer a rule blocks only above a \
+             threshold fitted to its own examples: add `good` and `bad` examples to the rule and run `uc test`, \
+             or set ANTHROPIC_API_KEY to have each one confirmed or dismissed",
             review.report.uncertain.len()
         ));
     }

@@ -61,6 +61,10 @@ enum Commands {
     Explain { path: String },
     #[command(about = "Check every rule file in the working tree for mistakes")]
     Validate,
+    #[command(
+        about = "Score each semantic rule's good and bad examples and fit its blocking threshold"
+    )]
+    Test,
 }
 
 fn check(options: &check::Options) -> Result<bool> {
@@ -130,6 +134,50 @@ fn validate() -> Result<bool> {
     Ok(errors == 0)
 }
 
+fn probabilities(values: &[f64]) -> String {
+    values
+        .iter()
+        .map(|value| format!("{value:.2}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn test() -> Result<bool> {
+    let git = git::Git::discover()?;
+    let files = resolve::load(&git, &Source::WorkTree)?;
+    let fits = semantic::test(&git, &files)?;
+    let mut failed = 0;
+    for fit in &fits {
+        println!("{}: {}", fit.rule_file, fit.title);
+        println!(
+            "  violating examples scored {}",
+            probabilities(&fit.violating)
+        );
+        println!(
+            "  complying examples scored {}",
+            probabilities(&fit.complying)
+        );
+        match (fit.threshold(), fit.problem()) {
+            (Some(threshold), _) => println!("  blocks at {threshold:.2}"),
+            (None, problem) => {
+                failed += 1;
+                println!("  error: {}", problem.unwrap_or_default());
+            }
+        }
+    }
+    let semantic = files
+        .iter()
+        .flat_map(|file| &file.parsed.rules)
+        .filter(|rule| rule.is_semantic())
+        .count();
+    println!(
+        "{} of {semantic} semantic rule(s) have a fitted threshold in {}; the rest only block when a second reviewer confirms",
+        fits.len() - failed,
+        semantic::THRESHOLDS_FILE
+    );
+    Ok(failed == 0)
+}
+
 fn main() -> ExitCode {
     let result = match Cli::parse().command {
         Commands::Check {
@@ -149,6 +197,7 @@ fn main() -> ExitCode {
         }),
         Commands::Explain { path } => explain(&path),
         Commands::Validate => validate(),
+        Commands::Test => test(),
     };
     match result {
         Ok(true) => ExitCode::SUCCESS,
