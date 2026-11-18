@@ -21,7 +21,9 @@ inputs:
       `commands` runs only command rules, `semantic` judges only semantic
       rules without executing anything from the change, `all` does both.
       `review` runs nothing: it posts the findings of the other jobs on the
-      pull request as review comments, and needs `pull-requests: write`.
+      pull request as review comments. Its job needs `pull-requests: write`
+      and a checkout. With `contents: write` as well it resolves the threads
+      of fixed findings; without it, it edits their comments to say so.
     default: all
   separate-instructions:
     description: >-
