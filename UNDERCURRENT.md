@@ -56,7 +56,7 @@ an `UNDERCURRENT.md` file.
 
 ```sh
 case "$FILE" in
-  *.rs) ! grep -HnE '^[[:space:]]*//|[[:space:]]//[[:space:]]|/\*' "$FILE" ;;
+  *.rs) ! grep -HnE '^[[:space:]]*//|[[:space:]]//[[:space:]]|(^|[[:space:]])/\*' "$FILE" ;;
   *) ! grep -HnE '^[[:space:]]*#|[[:space:]]#[[:space:]]' "$FILE" ;;
 esac
 ```

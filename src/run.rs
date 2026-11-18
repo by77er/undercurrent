@@ -1,5 +1,3 @@
-//! Running a command rule and turning its result into findings.
-
 use crate::resolve::RuleFile;
 use crate::rules::Rule;
 use std::path::Path;
@@ -11,7 +9,6 @@ const MAX_DETAIL_LINES: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Finding {
-    /// Path from the repository root; `None` when the rule covers a directory.
     pub path: Option<String>,
     pub line: Option<u32>,
     pub rule_id: String,
@@ -24,7 +21,6 @@ pub struct Finding {
 pub struct Job<'a> {
     pub file: &'a RuleFile,
     pub rule: &'a Rule,
-    /// Path from the repository root, for a rule that runs once per file.
     pub target: Option<&'a str>,
 }
 
@@ -42,8 +38,6 @@ impl Job<'_> {
     }
 }
 
-/// Reads `path:line: message` or `path:line:column: message`, the form most
-/// linters print. `path` may be relative to the rule's directory or the root.
 fn anchor(line: &str, root: &Path, dir: &str) -> Option<(String, u32, String)> {
     let (path, rest) = line.split_once(':')?;
     let (number, rest) = rest.split_once(':')?;
@@ -88,7 +82,6 @@ fn run_job(job: &Job, root: &Path) -> Vec<Finding> {
         .args(["-e", "-c", script])
         .current_dir(root.join(&job.file.dir));
     if let Some(relative) = job.target.and_then(|target| job.file.relative(target)) {
-        // The leading `./` stops a filename from being read as an option.
         command.env("FILE", format!("./{relative}"));
     }
     let target = job.target.map(String::from);
