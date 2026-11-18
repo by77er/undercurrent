@@ -27,17 +27,37 @@ pub fn post(
     headers: &[(&str, &str)],
     body: &Value,
 ) -> Result<Value, Failure> {
+    send(agent, "POST", url, headers, Some(body))
+}
+
+pub fn send(
+    agent: &ureq::Agent,
+    method: &str,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: Option<&Value>,
+) -> Result<Value, Failure> {
     let mut wait = Duration::from_secs(2);
     let mut last = String::new();
     for attempt in 1..=ATTEMPTS {
         let request = headers
             .iter()
-            .fold(agent.post(url), |request, (name, value)| {
+            .fold(agent.request(method, url), |request, (name, value)| {
                 request.set(name, value)
             });
-        match request.send_json(body) {
+        let outcome = match body {
+            Some(body) => request.send_json(body),
+            None => request.call(),
+        };
+        match outcome {
             Ok(response) => {
-                return response.into_json().map_err(|err| {
+                let text = response
+                    .into_string()
+                    .map_err(|err| Failure::Unavailable(format!("an unreadable body: {err}")))?;
+                if text.trim().is_empty() {
+                    return Ok(Value::Null);
+                }
+                return serde_json::from_str(&text).map_err(|err| {
                     Failure::Unavailable(format!("a body that is not JSON: {err}"))
                 });
             }

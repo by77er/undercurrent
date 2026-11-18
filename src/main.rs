@@ -1,5 +1,7 @@
 mod api;
 mod check;
+mod comments;
+mod findings;
 mod git;
 mod pool;
 mod report;
@@ -61,10 +63,24 @@ enum Commands {
             help = "Also require CLAUDE.md, AGENTS.md and skill files to change in pull requests of their own, like rule files"
         )]
         separate_instructions: bool,
+        #[arg(
+            long,
+            help = "Also write the findings to this file, for `uc comment` to post"
+        )]
+        findings: Option<String>,
     },
     #[command(about = "List the rules that govern a path, and where each comes from")]
-    Explain { path: String },
+    Explain {
+        path: String,
+    },
     #[command(about = "Check every rule file in the working tree for mistakes")]
+    #[command(
+        about = "Post findings on the pull request as review comments, skipping ones already posted and resolving ones that are fixed"
+    )]
+    Comment {
+        #[arg(help = "Files written by `uc check --findings`")]
+        findings: Vec<String>,
+    },
     Validate,
     #[command(
         about = "Score each semantic rule's good and bad examples and fit its blocking threshold"
@@ -72,12 +88,15 @@ enum Commands {
     Test,
 }
 
-fn check(options: &check::Options) -> Result<bool> {
+fn check(options: &check::Options, findings: Option<&str>) -> Result<bool> {
     let outcome = check::check(options)?;
     print!("{}", report::text(&outcome));
     if std::env::var_os("GITHUB_ACTIONS").is_some() {
         print!("{}", report::annotations(&outcome));
         report::write_step_summary(&outcome);
+    }
+    if let Some(destination) = findings {
+        findings::write(destination, &outcome, git::Git::discover()?.root())?;
     }
     let failed_to_run = outcome
         .semantic
@@ -87,6 +106,14 @@ fn check(options: &check::Options) -> Result<bool> {
         anyhow::bail!("some semantic rules could not be judged, so the check is incomplete; see the errors above");
     }
     Ok(outcome.findings.is_empty())
+}
+
+fn comment(paths: &[String]) -> Result<bool> {
+    let report = findings::read(paths)?;
+    for problem in comments::sync(&report)? {
+        println!("::warning title=Undercurrent::{problem}");
+    }
+    Ok(true)
 }
 
 fn explain(path: &str) -> Result<bool> {
@@ -193,15 +220,20 @@ fn main() -> ExitCode {
             skip_semantic,
             require_semantic,
             separate_instructions,
-        } => check(&check::Options {
-            base,
-            all,
-            rules_from_base,
-            skip_commands,
-            skip_semantic,
-            require_semantic,
-            separate_instructions,
-        }),
+            findings,
+        } => check(
+            &check::Options {
+                base,
+                all,
+                rules_from_base,
+                skip_commands,
+                skip_semantic,
+                require_semantic,
+                separate_instructions,
+            },
+            findings.as_deref(),
+        ),
+        Commands::Comment { findings } => comment(&findings),
         Commands::Explain { path } => explain(&path),
         Commands::Validate => validate(),
         Commands::Test => test(),
