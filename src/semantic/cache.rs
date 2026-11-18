@@ -18,6 +18,8 @@ pub struct Cache {
     location: Option<PathBuf>,
     previous: HashMap<String, Vec<Stored>>,
     current: HashMap<String, Vec<Stored>>,
+    previous_fits: HashMap<String, Option<f64>>,
+    current_fits: HashMap<String, Option<f64>>,
 }
 
 pub fn key(parts: &[&str]) -> String {
@@ -69,11 +71,29 @@ impl Cache {
                 }
             }
         }
+        let fits = parsed.as_ref().and_then(|value| value["fits"].as_object());
+        let previous_fits = fits.map(|fits| {
+            fits.iter()
+                .map(|(key, value)| (key.clone(), value.as_f64()))
+                .collect()
+        });
         Cache {
             location,
             previous,
             current: HashMap::new(),
+            previous_fits: previous_fits.unwrap_or_default(),
+            current_fits: HashMap::new(),
         }
+    }
+
+    pub fn fit(&mut self, fingerprint: &str) -> Option<Option<f64>> {
+        let fit = *self.previous_fits.get(fingerprint)?;
+        self.current_fits.insert(fingerprint.to_string(), fit);
+        Some(fit)
+    }
+
+    pub fn put_fit(&mut self, fingerprint: String, threshold: Option<f64>) {
+        self.current_fits.insert(fingerprint, threshold);
     }
 
     pub fn get(&mut self, key: &str) -> Option<Vec<Stored>> {
@@ -95,7 +115,12 @@ impl Cache {
             .iter()
             .map(|(key, stored)| (key.clone(), encode(stored)))
             .collect();
-        let text = serde_json::to_string(&json!({ "entries": entries }))?;
+        let fits: serde_json::Map<String, Value> = self
+            .current_fits
+            .iter()
+            .map(|(key, threshold)| (key.clone(), json!(threshold)))
+            .collect();
+        let text = serde_json::to_string(&json!({ "entries": entries, "fits": fits }))?;
         std::fs::write(location, text).with_context(|| {
             format!(
                 "could not write the verdict cache to {}; check it is writable",

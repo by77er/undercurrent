@@ -123,7 +123,7 @@ fn unconfirmed(candidate: &Candidate, target: &Target, threshold: f64) -> Stored
         "{quoted}\nA decision model judged the changed hunk starting here a violation with probability {probability:.2}, \
          above the {threshold:.2} fitted to this rule's examples. No second reviewer checked it.\n\
          Fix: change the hunk to follow the rule. If it already complies, add it to the rule as a `good` \
-         example and run `uc test`, or set ANTHROPIC_API_KEY so a second reviewer confirms or dismisses this."
+         example, or set ANTHROPIC_API_KEY so a second reviewer confirms or dismisses this."
     );
     Stored {
         path: target.path.clone(),
@@ -171,7 +171,11 @@ impl Review<'_> {
         );
         cache::key(&[
             self.engines.tag(),
-            &format!("{:?}", self.thresholds.get(rule)),
+            &self
+                .thresholds
+                .get(rule)
+                .map(|threshold| format!("{threshold:.2}"))
+                .unwrap_or_default(),
             jev::MODEL,
             prompt::VERSION,
             prompt::TRIAGE_MODEL,
@@ -466,13 +470,11 @@ fn semantic_rules(rule_files: &[RuleFile]) -> Vec<SemRule<'_>> {
     rules.collect()
 }
 
-pub const THRESHOLDS_FILE: &str = thresholds::FILE;
-
 pub fn digest(parts: &[&str]) -> String {
     cache::key(parts)
 }
 
-pub fn test(git: &Git, rule_files: &[RuleFile]) -> Result<Vec<thresholds::Fit>> {
+pub fn test(rule_files: &[RuleFile]) -> Result<Vec<thresholds::Fit>> {
     let Some(jev) = Jev::from_env() else {
         anyhow::bail!("uc test scores rule examples with Jev and TYPESAFE_API_KEY is not set; set it and run again");
     };
@@ -485,8 +487,46 @@ pub fn test(git: &Git, rule_files: &[RuleFile]) -> Result<Vec<thresholds::Fit>> 
         thresholds::fit(&jev, rule)
     });
     let fits = fits.into_iter().collect::<Result<Vec<_>>>()?;
-    thresholds::write(git.root(), &fits)?;
     Ok(fits)
+}
+
+fn fit_rules(
+    jev: &Jev,
+    rules: &[SemRule],
+    targets: &[Target],
+    cache: &mut Cache,
+    report: &mut Report,
+) -> Thresholds {
+    let mut thresholds = Thresholds::default();
+    let in_use = |rule: &SemRule| {
+        !rule.rule.examples.is_empty()
+            && targets
+                .iter()
+                .any(|target| rule.file.applies(rule.rule, &target.path))
+    };
+    let mut unfitted = Vec::new();
+    for rule in rules.iter().filter(|rule| in_use(rule)) {
+        match cache.fit(&thresholds::fingerprint(rule)) {
+            Some(Some(threshold)) => thresholds.set(rule, threshold),
+            Some(None) => {}
+            None => unfitted.push(rule),
+        }
+    }
+    let fits = pool::map(&unfitted, TRIAGE_WORKERS, |rule| thresholds::fit(jev, rule));
+    for (rule, fit) in unfitted.into_iter().zip(fits) {
+        match fit {
+            Ok(fit) => {
+                cache.put_fit(fit.fingerprint.clone(), fit.threshold());
+                if let Some(threshold) = fit.threshold() {
+                    thresholds.set(rule, threshold);
+                }
+            }
+            Err(err) => report
+                .errors
+                .push(format!("fitting `{}`: {err:#}", rule.rule.title)),
+        }
+    }
+    thresholds
 }
 
 fn load_targets(
@@ -516,7 +556,6 @@ pub fn run(
     merge_base: Option<&str>,
     files: &[String],
     rule_files: &[RuleFile],
-    fitted: &str,
 ) -> Result<Report> {
     let mut report = Report::default();
     let rules = semantic_rules(rule_files);
@@ -526,7 +565,6 @@ pub fn run(
         root: git.root(),
         files: &all_files,
     };
-    let thresholds = Thresholds::parse(fitted);
     let units: Vec<Unit> = targets
         .iter()
         .enumerate()
@@ -536,13 +574,18 @@ pub fn run(
                 .map(move |hunk| Unit { target, hunk })
         })
         .collect();
+    let mut cache = Cache::load(git);
+    let thresholds = match &engines.jev {
+        Some(jev) => fit_rules(jev, &rules, &targets, &mut cache, &mut report),
+        None => Thresholds::default(),
+    };
     let mut review = Review {
         engines,
         thresholds,
         rules,
         targets,
         units,
-        cache: Cache::load(git),
+        cache,
         stored: Vec::new(),
         report,
     };
@@ -566,7 +609,7 @@ pub fn run(
         review.report.uncertain.sort();
         review.report.notes.push(format!(
             "{} possible violation(s) did not fail the check. Without a second reviewer a rule blocks only above a \
-             threshold fitted to its own examples: add `good` and `bad` examples to the rule and run `uc test`, \
+             threshold fitted to its own examples: add `good` and `bad` examples to the rule, and run `uc test` to see whether they separate, \
              or set ANTHROPIC_API_KEY to have each one confirmed or dismissed",
             review.report.uncertain.len()
         ));
