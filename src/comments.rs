@@ -114,12 +114,11 @@ impl GitHub {
     fn from_env() -> Result<GitHub> {
         let in_actions = "run `uc comment` inside a GitHub Actions job triggered by a pull request";
         let event_path = env("GITHUB_EVENT_PATH", in_actions)?;
-        let event: Value = serde_json::from_str(&std::fs::read_to_string(&event_path)?)
-            .with_context(|| format!("{event_path} is not JSON; {in_actions}"))?;
+        let event: Value = serde_json::from_str(&std::fs::read_to_string(&event_path)?).unwrap();
         let pull = &event["pull_request"];
         let (Some(number), Some(head)) = (pull["number"].as_u64(), pull["head"]["sha"].as_str())
         else {
-            bail!("the triggering event is not a pull request, so there is nothing to comment on; {in_actions}");
+            bail!("not a pull request");
         };
         let api =
             api::env_key("GITHUB_API_URL").unwrap_or_else(|| "https://api.github.com".to_string());
