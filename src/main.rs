@@ -83,7 +83,7 @@ enum Commands {
     },
     Validate,
     #[command(
-        about = "Score each semantic rule's good and bad examples and fit its blocking threshold"
+        about = "Score each semantic rule's good and bad examples and report the threshold they give"
     )]
     Test,
 }
@@ -177,7 +177,7 @@ fn probabilities(values: &[f64]) -> String {
 fn test() -> Result<bool> {
     let git = git::Git::discover()?;
     let files = resolve::load(&git, &Source::WorkTree)?;
-    let fits = semantic::test(&git, &files)?;
+    let fits = semantic::test(&files)?;
     let mut failed = 0;
     for fit in &fits {
         println!("{}: {}", fit.rule_file, fit.title);
@@ -203,9 +203,8 @@ fn test() -> Result<bool> {
         .filter(|rule| rule.is_semantic())
         .count();
     println!(
-        "{} of {semantic} semantic rule(s) have a fitted threshold in {}; the rest only block when a second reviewer confirms",
-        fits.len() - failed,
-        semantic::THRESHOLDS_FILE
+        "{} of {semantic} semantic rule(s) have examples the model can tell apart; without a second reviewer only those can block",
+        fits.len() - failed
     );
     Ok(failed == 0)
 }

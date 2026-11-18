@@ -40,7 +40,7 @@ const MAX_LISTED: usize = 10;
 
 fn is_guidance(path: &str, with_instructions: bool) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
-    let rule_side = resolve::is_rule_file(path) || path == semantic::THRESHOLDS_FILE;
+    let rule_side = resolve::is_rule_file(path);
     let in_skills = path.starts_with(".claude/skills/") || path.contains("/.claude/skills/");
     let instruction = matches!(name, "CLAUDE.md" | "AGENTS.md" | "SKILL.md") || in_skills;
     rule_side || (with_instructions && instruction)
@@ -243,22 +243,7 @@ pub fn check(options: &Options) -> Result<Outcome> {
         outcome.unevaluated_reason = "neither TYPESAFE_API_KEY nor ANTHROPIC_API_KEY is set; set one of them to have these rules judged";
         return Ok(outcome);
     };
-    let fitted = match (&source, outcome.bootstrapped) {
-        (Source::Commit(reference), false) => git
-            .show(reference, semantic::THRESHOLDS_FILE)
-            .unwrap_or_default(),
-        _ => {
-            std::fs::read_to_string(git.root().join(semantic::THRESHOLDS_FILE)).unwrap_or_default()
-        }
-    };
-    let report = semantic::run(
-        &engines,
-        &git,
-        merge_base.as_deref(),
-        &files,
-        &rule_files,
-        &fitted,
-    )?;
+    let report = semantic::run(&engines, &git, merge_base.as_deref(), &files, &rule_files)?;
     outcome.findings.extend(report.findings.iter().cloned());
     outcome.semantic_complete = report.errors.is_empty();
     outcome.semantic = Some(report);
@@ -276,16 +261,7 @@ mod tests {
     #[test]
     fn rule_files_and_other_files_do_not_mix() {
         assert!(mixed_change(&paths(&["src/UNDERCURRENT.md", "src/main.rs"]), false).is_some());
-        assert!(mixed_change(
-            &paths(&[".undercurrent/thresholds.json", "action.yml"]),
-            false
-        )
-        .is_some());
-        assert!(mixed_change(
-            &paths(&["UNDERCURRENT.md", ".undercurrent/thresholds.json"]),
-            false
-        )
-        .is_none());
+        assert!(mixed_change(&paths(&["UNDERCURRENT.md", "src/UNDERCURRENT.md"]), false).is_none());
         assert!(mixed_change(&paths(&["src/main.rs", "src/check.rs"]), false).is_none());
     }
 

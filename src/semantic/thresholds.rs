@@ -5,11 +5,8 @@ use super::review::SemRule;
 use super::target::Target;
 use crate::rules::Example;
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::Path;
 
-pub const FILE: &str = ".undercurrent/thresholds.json";
 const MIN_GAP: f64 = 0.1;
 const JITTER: f64 = 0.05;
 
@@ -20,7 +17,6 @@ pub struct Thresholds {
 
 pub struct Fit {
     pub rule_file: String,
-    pub id: String,
     pub title: String,
     pub fingerprint: String,
     pub violating: Vec<f64>,
@@ -44,21 +40,8 @@ pub fn fingerprint(rule: &SemRule) -> String {
 }
 
 impl Thresholds {
-    pub fn parse(text: &str) -> Thresholds {
-        let value: Value = serde_json::from_str(text).unwrap_or_default();
-        let rules = value["rules"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let pairs = rules.iter().filter_map(|rule| {
-            Some((
-                rule["fingerprint"].as_str()?.to_string(),
-                rule["threshold"].as_f64()?,
-            ))
-        });
-        Thresholds {
-            by_fingerprint: pairs.collect(),
-        }
+    pub fn set(&mut self, rule: &SemRule, threshold: f64) {
+        self.by_fingerprint.insert(fingerprint(rule), threshold);
     }
 
     pub fn get(&self, rule: &SemRule) -> Option<f64> {
@@ -119,7 +102,6 @@ fn score(jev: &Jev, rule: &SemRule, example: &Example) -> Result<f64> {
 pub fn fit(jev: &Jev, rule: &SemRule) -> Result<Fit> {
     let mut fit = Fit {
         rule_file: rule.file.path.clone(),
-        id: rule.rule.id.clone(),
         title: rule.rule.title.clone(),
         fingerprint: fingerprint(rule),
         violating: Vec::new(),
@@ -141,31 +123,6 @@ pub fn fit(jev: &Jev, rule: &SemRule) -> Result<Fit> {
     Ok(fit)
 }
 
-pub fn write(root: &Path, fits: &[Fit]) -> Result<()> {
-    let round = |value: f64| (value * 100.0).round() / 100.0;
-    let rounded =
-        |values: &[f64]| -> Vec<f64> { values.iter().map(|value| round(*value)).collect() };
-    let fitted = fits.iter().filter_map(|fit| {
-        let threshold = fit.threshold()?;
-        Some(json!({
-            "rule_file": fit.rule_file,
-            "id": fit.id,
-            "fingerprint": fit.fingerprint,
-            "threshold": round(threshold),
-            "violating": rounded(&fit.violating),
-            "complying": rounded(&fit.complying),
-        }))
-    });
-    let body = json!({ "model": jev::MODEL, "rules": fitted.collect::<Vec<_>>() });
-    let path = root.join(FILE);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let text = format!("{}\n", serde_json::to_string_pretty(&body)?);
-    std::fs::write(&path, text)
-        .with_context(|| format!("could not write {FILE}; check the directory is writable"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,7 +130,6 @@ mod tests {
     fn fit(violating: &[f64], complying: &[f64]) -> Fit {
         Fit {
             rule_file: String::new(),
-            id: String::new(),
             title: String::new(),
             fingerprint: "f".to_string(),
             violating: violating.to_vec(),
@@ -193,12 +149,5 @@ mod tests {
         assert!(fit(&[0.9], &[]).problem().is_some());
         assert!(fit(&[0.5], &[0.45]).problem().is_some());
         assert!(fit(&[0.9], &[0.1]).problem().is_none());
-    }
-
-    #[test]
-    fn stored_thresholds_are_read_back_by_fingerprint() {
-        let thresholds = Thresholds::parse(r#"{"rules":[{"fingerprint":"abc","threshold":0.62}]}"#);
-        assert_eq!(thresholds.by_fingerprint.get("abc"), Some(&0.62));
-        assert!(Thresholds::parse("not json").by_fingerprint.is_empty());
     }
 }
