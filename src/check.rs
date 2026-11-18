@@ -161,7 +161,8 @@ pub fn check(options: &Options) -> Result<Outcome> {
     }
     if options.skip_semantic {
         outcome.unevaluated = applicable;
-        outcome.unevaluated_reason = "--skip-semantic was passed";
+        outcome.unevaluated_reason =
+            "--skip-semantic was passed; run again without it to have these rules judged";
         return Ok(outcome);
     }
     let Some(engines) = semantic::Engines::from_env() else {
