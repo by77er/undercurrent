@@ -1,9 +1,8 @@
+use crate::pool;
 use crate::resolve::RuleFile;
 use crate::rules::Rule;
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
 
 const MAX_DETAIL_LINES: usize = 20;
 
@@ -80,7 +79,9 @@ fn run_job(job: &Job, root: &Path) -> Vec<Finding> {
     let mut command = Command::new("sh");
     command
         .args(["-e", "-c", script])
-        .current_dir(root.join(&job.file.dir));
+        .current_dir(root.join(&job.file.dir))
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("TYPESAFE_API_KEY");
     if let Some(relative) = job.target.and_then(|target| job.file.relative(target)) {
         command.env("FILE", format!("./{relative}"));
     }
@@ -110,24 +111,11 @@ fn run_job(job: &Job, root: &Path) -> Vec<Finding> {
 }
 
 pub fn run_all(jobs: &[Job], root: &Path) -> Vec<Finding> {
-    let next = AtomicUsize::new(0);
-    let findings = Mutex::new(Vec::new());
-    let workers = std::thread::available_parallelism()
-        .map_or(4, |n| n.get())
-        .min(jobs.len().max(1));
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            scope.spawn(|| {
-                while let Some(job) = jobs.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    let found = run_job(job, root);
-                    if let Ok(mut all) = findings.lock() {
-                        all.extend(found);
-                    }
-                }
-            });
-        }
-    });
-    let mut findings = findings.into_inner().unwrap_or_default();
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let mut findings: Vec<Finding> = pool::map(jobs, workers, |job| run_job(job, root))
+        .into_iter()
+        .flatten()
+        .collect();
     findings.sort();
     findings.dedup();
     findings

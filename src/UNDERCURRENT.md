@@ -25,3 +25,21 @@ File paths, file contents and anything else a pull request author controls
 reach a child process only as a separate argument or an environment
 variable. They are never formatted into a shell string or a git revision
 expression, because the author could then run code in the check.
+
+```rust bad
+let script = format!("wc -l {path}");
+Command::new("sh").arg("-c").arg(script).output()?;
+```
+
+```rust bad
+let command = format!("git log --oneline {branch}");
+std::process::Command::new("bash").args(["-c", &command]).status()?;
+```
+
+```rust good
+Command::new("git").args(["diff", "--", path]).output()?;
+```
+
+```rust good
+command.env("FILE", format!("./{relative}"));
+```

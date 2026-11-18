@@ -89,3 +89,19 @@ the same information could not be inferred.
 Every error, warning and finding the tool prints is read by a coding agent
 that will act on it. A message names the problem and the fix, not only the
 problem.
+
+```rust bad
+bail!("invalid base");
+```
+
+```rust bad
+eprintln!("error: could not read the file");
+```
+
+```rust good
+bail!("base `{base}` is not a known commit; fetch it first");
+```
+
+```rust good
+eprintln!("error: {path} is not UTF-8 text; convert it or mark it as generated");
+```

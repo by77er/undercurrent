@@ -24,11 +24,22 @@ fn summary(outcome: &Outcome) -> String {
         outcome.files,
         outcome.commands_run
     );
+    if let Some(semantic) = &outcome.semantic {
+        let _ = write!(
+            line,
+            " {} semantic check(s): {} from cache, {} flagged for a second look, {} failed to run.",
+            semantic.checks,
+            semantic.cached,
+            semantic.flagged,
+            semantic.errors.len()
+        );
+    }
     if !outcome.unevaluated.is_empty() {
         let _ = write!(
             line,
-            " {} semantic rule(s) applied but were NOT judged: the semantic engine is not built yet.",
-            outcome.unevaluated.len()
+            " {} semantic rule(s) applied but were NOT judged because {}.",
+            outcome.unevaluated.len(),
+            outcome.unevaluated_reason
         );
     }
     if outcome.bootstrapped {
@@ -37,6 +48,19 @@ fn summary(outcome: &Outcome) -> String {
         );
     }
     line
+}
+
+fn problems(outcome: &Outcome) -> Vec<String> {
+    let Some(semantic) = &outcome.semantic else {
+        return Vec::new();
+    };
+    let tagged = |tag: &'static str, lines: &[String]| -> Vec<String> {
+        lines.iter().map(|line| format!("{tag}: {line}")).collect()
+    };
+    let mut all = tagged("possible", &semantic.uncertain);
+    all.extend(tagged("error", &semantic.errors));
+    all.extend(tagged("note", &semantic.notes));
+    all
 }
 
 pub fn text(outcome: &Outcome) -> String {
@@ -52,6 +76,9 @@ pub fn text(outcome: &Outcome) -> String {
     }
     for (rule_file, title) in &outcome.unevaluated {
         let _ = writeln!(out, "not judged: {title} ({rule_file})");
+    }
+    for problem in problems(outcome) {
+        let _ = writeln!(out, "{problem}");
     }
     out.push_str(&summary(outcome));
     out.push('\n');
@@ -84,6 +111,30 @@ pub fn annotations(outcome: &Outcome) -> String {
             out,
             "::error {properties}::{}",
             escape(message.trim(), false)
+        );
+    }
+    if !outcome.unevaluated.is_empty() {
+        let message = format!(
+            "{} semantic rule(s) were not judged because {}.",
+            outcome.unevaluated.len(),
+            outcome.unevaluated_reason
+        );
+        let _ = writeln!(
+            out,
+            "::warning title=Undercurrent::{}",
+            escape(&message, false)
+        );
+    }
+    for problem in problems(outcome) {
+        let level = if problem.starts_with("error") {
+            "error"
+        } else {
+            "warning"
+        };
+        let _ = writeln!(
+            out,
+            "::{level} title=Undercurrent::{}",
+            escape(&problem, false)
         );
     }
     out

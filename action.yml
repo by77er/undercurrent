@@ -12,18 +12,45 @@ inputs:
   all:
     description: Set to `true` to check every file instead of only changed ones.
     default: "false"
+  mode:
+    description: >-
+      `commands` runs only command rules, `semantic` judges only semantic
+      rules without executing anything from the change, `all` does both.
+    default: all
+  typesafe-api-key:
+    description: >-
+      TypeSafe API key. With it, the Jev decision model does the first pass
+      over semantic rules. It is never passed to command rules.
+    default: ""
+  anthropic-api-key:
+    description: >-
+      Claude API key. With it, a second reviewer confirms each flag and rules
+      that span files are judged. With neither key, semantic rules are listed
+      but not judged. It is never passed to command rules.
+    default: ""
 runs:
   using: composite
   steps:
     - name: Build uc
       shell: bash
       run: cargo build --release --locked --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml"
+    - name: Restore verdict cache
+      if: inputs.mode != 'commands'
+      uses: actions/cache/restore@v4
+      with:
+        path: .git/undercurrent-cache.json
+        key: undercurrent-${{ github.event.pull_request.number || github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          undercurrent-${{ github.event.pull_request.number || github.ref_name }}-
     - name: Run rules
       shell: bash
       env:
         UC_BASE: ${{ inputs.base }}
         UC_RULES_FROM: ${{ inputs.rules-from }}
         UC_ALL: ${{ inputs.all }}
+        UC_MODE: ${{ inputs.mode }}
+        ANTHROPIC_API_KEY: ${{ inputs.mode != 'commands' && inputs.anthropic-api-key || '' }}
+        TYPESAFE_API_KEY: ${{ inputs.mode != 'commands' && inputs.typesafe-api-key || '' }}
       run: |
         args=()
         base="$UC_BASE"
@@ -33,4 +60,12 @@ runs:
         if [ -n "$base" ]; then args+=(--base "$base"); fi
         if [ "$UC_RULES_FROM" = "base" ] && [ -n "$base" ]; then args+=(--rules-from-base); fi
         if [ "$UC_ALL" = "true" ]; then args+=(--all); fi
+        if [ "$UC_MODE" = "commands" ]; then args+=(--skip-semantic); fi
+        if [ "$UC_MODE" = "semantic" ]; then args+=(--skip-commands); fi
         "$GITHUB_ACTION_PATH/target/release/uc" check "${args[@]}"
+    - name: Save verdict cache
+      if: always() && inputs.mode != 'commands'
+      uses: actions/cache/save@v4
+      with:
+        path: .git/undercurrent-cache.json
+        key: undercurrent-${{ github.event.pull_request.number || github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
