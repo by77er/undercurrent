@@ -245,7 +245,7 @@ pub fn check(options: &Options) -> Result<Outcome> {
     };
     let report = semantic::run(&engines, &git, merge_base.as_deref(), &files, &rule_files)?;
     outcome.findings.extend(report.findings.iter().cloned());
-    outcome.semantic_complete = report.errors.is_empty();
+    outcome.semantic_complete = report.errors.is_empty() && report.out_of_credit.is_empty();
     outcome.semantic = Some(report);
     Ok(outcome)
 }
