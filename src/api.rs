@@ -86,7 +86,46 @@ pub fn send(
     )))
 }
 
+#[derive(Debug)]
+pub struct OutOfCredit(pub String);
+
+impl std::fmt::Display for OutOfCredit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} reports that the account has no credit left; add credit to have semantic rules judged again", self.0)
+    }
+}
+
+impl std::error::Error for OutOfCredit {}
+
+const NO_CREDIT_SIGNS: &[&str] = &[
+    "billing_error",
+    "credit balance",
+    "insufficient credit",
+    "out of credit",
+    "insufficient_quota",
+    "insufficient funds",
+    "payment required",
+];
+
+fn out_of_credit(failure: &Failure) -> bool {
+    let (code, text) = match failure {
+        Failure::Rejected { code, body } => (Some(*code), body),
+        Failure::Unavailable(detail) => (None, detail),
+    };
+    let lowered = text.to_lowercase();
+    code == Some(402) || NO_CREDIT_SIGNS.iter().any(|sign| lowered.contains(sign))
+}
+
+pub fn ran_out_of_credit(err: &anyhow::Error) -> Option<&str> {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<OutOfCredit>())
+        .map(|out| out.0.as_str())
+}
+
 pub fn describe(service: &str, failure: Failure) -> anyhow::Error {
+    if out_of_credit(&failure) {
+        return anyhow::Error::new(OutOfCredit(service.to_string()));
+    }
     match failure {
         Failure::Rejected { code, body } => {
             anyhow::anyhow!("{service} rejected the request with HTTP {code}: {body}; check the API key and request")
@@ -145,5 +184,44 @@ impl Client {
                 .to_string(),
             content: value["content"].as_array().cloned().unwrap_or_default(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rejected(code: u16, body: &str) -> Failure {
+        Failure::Rejected {
+            code,
+            body: body.to_string(),
+        }
+    }
+
+    #[test]
+    fn exhausted_credit_is_told_apart_from_other_failures() {
+        assert!(out_of_credit(&rejected(402, "{}")));
+        assert!(out_of_credit(&rejected(
+            400,
+            r#"{"error":{"message":"Your credit balance is too low to access the API"}}"#
+        )));
+        assert!(out_of_credit(&Failure::Unavailable(
+            "4 failed attempts, last with HTTP 429: insufficient_quota".to_string()
+        )));
+        assert!(!out_of_credit(&rejected(401, "invalid x-api-key")));
+        assert!(!out_of_credit(&rejected(429, "rate limit exceeded")));
+        assert!(!out_of_credit(&Failure::Unavailable(
+            "connection reset".to_string()
+        )));
+    }
+
+    #[test]
+    fn the_cause_survives_added_context() {
+        let err = describe("the Claude API", rejected(402, "{}")).context("src/a.rs");
+        assert_eq!(ran_out_of_credit(&err), Some("the Claude API"));
+        assert_eq!(
+            ran_out_of_credit(&describe("the Claude API", rejected(500, "boom"))),
+            None
+        );
     }
 }

@@ -59,6 +59,18 @@ pub struct Report {
     pub errors: Vec<String>,
     pub notes: Vec<String>,
     pub uncertain: Vec<String>,
+    pub out_of_credit: BTreeSet<String>,
+}
+
+impl Report {
+    fn record(&mut self, during: String, err: &anyhow::Error) {
+        match crate::api::ran_out_of_credit(err) {
+            Some(service) => {
+                self.out_of_credit.insert(service.to_string());
+            }
+            None => self.errors.push(format!("{during}: {err:#}")),
+        }
+    }
 }
 
 struct Unit {
@@ -259,9 +271,7 @@ impl Review<'_> {
             let verdicts = match result {
                 Ok(verdicts) => verdicts,
                 Err(err) => {
-                    self.report
-                        .errors
-                        .push(format!("{}: {err:#}", self.targets[target].path));
+                    self.report.record(self.targets[target].path.clone(), &err);
                     continue;
                 }
             };
@@ -314,9 +324,7 @@ impl Review<'_> {
             let mut flagged = match result {
                 Ok(flagged) => flagged,
                 Err(err) => {
-                    self.report
-                        .errors
-                        .push(format!("{}: {err:#}", self.targets[*target].path));
+                    self.report.record(self.targets[*target].path.clone(), &err);
                     continue;
                 }
             };
@@ -364,9 +372,7 @@ impl Review<'_> {
         match review::whole(claude, &self.rules, &indices, &self.targets) {
             Ok(candidates) => candidates,
             Err(err) => {
-                self.report
-                    .errors
-                    .push(format!("whole-change pass: {err:#}"));
+                self.report.record("whole-change pass".to_string(), &err);
                 Vec::new()
             }
         }
@@ -387,10 +393,8 @@ impl Review<'_> {
             let raw = match result {
                 Ok(raw) => raw,
                 Err(err) => {
-                    self.report.errors.push(format!(
-                        "{}: {err:#}",
-                        self.rules[candidate.rule].rule.title
-                    ));
+                    self.report
+                        .record(self.rules[candidate.rule].rule.title.clone(), &err);
                     continue;
                 }
             };
@@ -521,9 +525,7 @@ fn fit_rules(
                     thresholds.set(rule, threshold);
                 }
             }
-            Err(err) => report
-                .errors
-                .push(format!("fitting `{}`: {err:#}", rule.rule.title)),
+            Err(err) => report.record(format!("fitting `{}`", rule.rule.title), &err),
         }
     }
     thresholds
@@ -612,6 +614,12 @@ pub fn run(
              threshold fitted to its own examples: add `good` and `bad` examples to the rule, and run `uc test` to see whether they separate, \
              or set ANTHROPIC_API_KEY to have each one confirmed or dismissed",
             review.report.uncertain.len()
+        ));
+    }
+    for service in &review.report.out_of_credit {
+        review.report.notes.push(format!(
+            "{service} reports that the account has no credit left, so some semantic rules were not judged and \
+             did not fail this check; add credit to that account to have them judged again"
         ));
     }
     if let Err(err) = review.cache.save() {
